@@ -34,12 +34,14 @@ func WithByteOrder(bo binary.ByteOrder) Option { return func(c *writerConfig) { 
 func WithBigTIFF(b bool) Option { return func(c *writerConfig) { c.bigtiff = b } }
 
 // imageEntry holds the data for one IFD to be written.
+// If spec is non-nil the entry is tiled (AddLevel); if nil it is stripped (AddStrippedImage).
 type imageEntry struct {
 	tags         []ifdTag
 	stripOffsets []uint32
 	stripCounts  []uint32
-	tileOffsets  []uint64 // reserved for Task 5 (tiled IFDs)
-	tileCounts   []uint64 // reserved for Task 5 (tiled IFDs)
+	tileOffsets  []uint64  // populated by LevelHandle.WriteTile
+	tileCounts   []uint64  // populated by LevelHandle.WriteTile
+	spec         *LevelSpec // non-nil for tiled entries
 }
 
 // ifdTag represents one TIFF directory entry before encoding.
@@ -55,8 +57,9 @@ type ifdTag struct {
 
 // TIFF type constants.
 const (
-	tiffTypeSHORT = uint16(3)
-	tiffTypeLONG  = uint16(4)
+	tiffTypeSHORT     = uint16(3)
+	tiffTypeLONG      = uint16(4)
+	tiffTypeUNDEFINED = uint16(7) // TIFF type 7: arbitrary byte data (JPEGTables, ICCProfile)
 )
 
 // Create opens a new TIFF file for writing. The file is created at path+".tmp"
@@ -88,6 +91,88 @@ type StrippedSpec struct {
 	Compression               uint16
 	PhotometricInterpretation uint16
 	StripBytes                []byte // raw pixel data (or pre-encoded if Compression != None)
+}
+
+// LevelSpec describes one pyramid level. For Aperio SVS output, downstream
+// callers will additionally set JPEGTables + JPEGAbbreviatedTiles for the
+// JPEG-7 case; v0.1 of this writer doesn't validate those interactions, but
+// records them faithfully into the IFD.
+type LevelSpec struct {
+	ImageWidth, ImageHeight   uint32
+	TileWidth, TileHeight     uint32
+	Compression               uint16
+	PhotometricInterpretation uint16
+	JPEGTables                []byte // tables-only JPEG (SOI + DQT + DHT + EOI), per-level
+	JPEGAbbreviatedTiles      bool
+	ICCProfile                []byte
+	ExtraTags                 []TIFFTag
+
+	// SamplesPerPixel defaults to 3 if zero.
+	SamplesPerPixel uint16
+
+	// SubfileType / NewSubfileType for pyramid level signalling. Aperio uses
+	// NewSubfileType=0 for L0 and NewSubfileType=1 (reduced-resolution) for L1+.
+	NewSubfileType uint32
+}
+
+// TIFFTag is an opaque carrier for caller-supplied IFD entries (e.g.,
+// codec-specific private tags).
+type TIFFTag struct {
+	Tag   uint16
+	Type  uint16
+	Count uint64
+	Value []byte
+}
+
+// LevelHandle accepts tile bytes for one level.
+type LevelHandle struct {
+	w      *Writer
+	entry  *imageEntry
+	tilesX uint32
+	tilesY uint32
+}
+
+// AddLevel appends a tiled IFD to the TIFF file. Tile data is written by
+// subsequent LevelHandle.WriteTile calls; the IFD is deferred until Close.
+func (w *Writer) AddLevel(s LevelSpec) (*LevelHandle, error) {
+	if w.closed {
+		return nil, fmt.Errorf("wsiwriter: writer is closed")
+	}
+	if s.TileWidth == 0 || s.TileHeight == 0 {
+		return nil, fmt.Errorf("wsiwriter: tile dimensions must be non-zero")
+	}
+	if s.SamplesPerPixel == 0 {
+		s.SamplesPerPixel = 3
+	}
+	tilesX := (s.ImageWidth + s.TileWidth - 1) / s.TileWidth
+	tilesY := (s.ImageHeight + s.TileHeight - 1) / s.TileHeight
+	entry := &imageEntry{
+		tileOffsets: make([]uint64, tilesX*tilesY),
+		tileCounts:  make([]uint64, tilesX*tilesY),
+		spec:        &s,
+	}
+	w.imgs = append(w.imgs, entry)
+	return &LevelHandle{w: w, entry: entry, tilesX: tilesX, tilesY: tilesY}, nil
+}
+
+// WriteTile writes compressed (or raw) tile bytes to the file and records the
+// offset and byte count for later IFD emission. Tiles may be written in any order.
+func (h *LevelHandle) WriteTile(x, y uint32, compressed []byte) error {
+	if x >= h.tilesX || y >= h.tilesY {
+		return fmt.Errorf("wsiwriter: tile (%d,%d) out of grid (%d,%d)",
+			x, y, h.tilesX, h.tilesY)
+	}
+	off, err := h.w.f.Seek(0, 1) // current offset
+	if err != nil {
+		return err
+	}
+	if _, err := h.w.f.Write(compressed); err != nil {
+		return err
+	}
+	idx := y*h.tilesX + x
+	h.entry.tileOffsets[idx] = uint64(off)
+	h.entry.tileCounts[idx] = uint64(len(compressed))
+	return nil
 }
 
 // AddStrippedImage appends a single-strip IFD to the TIFF file.
@@ -156,6 +241,15 @@ func (w *Writer) Close() error {
 	nextIFDPatchAt := make([]int64, len(w.imgs))
 
 	for i, entry := range w.imgs {
+		// For tiled entries, build the IFD tag list now (after all WriteTile calls
+		// have populated tileOffsets/tileCounts).
+		if entry.spec != nil {
+			if err := w.buildTiledTags(entry); err != nil {
+				w.f.Close()
+				return fmt.Errorf("wsiwriter: build tiled tags for IFD %d: %w", i, err)
+			}
+		}
+
 		// 1. Write out-of-band tag values (BitsPerSample etc.).
 		if err := w.writeOutOfBandValues(entry); err != nil {
 			w.f.Close()
@@ -374,4 +468,96 @@ func (w *Writer) makeLongTag(tag uint16, val uint32) ifdTag {
 	b := make([]byte, 4)
 	w.bo.PutUint32(b, val)
 	return ifdTag{tag: tag, typ: tiffTypeLONG, count: 1, value: b}
+}
+
+// makeLongsTag creates an ifdTag for a slice of LONG (uint32) values.
+// If len(vals)*4 > 4, the value will be written out-of-band by writeOutOfBandValues.
+func (w *Writer) makeLongsTag(tag uint16, vals []uint32) ifdTag {
+	b := make([]byte, 4*len(vals))
+	for i, v := range vals {
+		w.bo.PutUint32(b[4*i:], v)
+	}
+	return ifdTag{tag: tag, typ: tiffTypeLONG, count: uint64(len(vals)), value: b}
+}
+
+// makeUndefinedTag creates an ifdTag for an opaque byte blob (TIFF type UNDEFINED).
+// Values longer than 4 bytes will be written out-of-band by writeOutOfBandValues.
+func (w *Writer) makeUndefinedTag(tag uint16, data []byte) ifdTag {
+	b := make([]byte, len(data))
+	copy(b, data)
+	return ifdTag{tag: tag, typ: tiffTypeUNDEFINED, count: uint64(len(data)), value: b}
+}
+
+// buildTiledTags constructs the IFD tag list for a tiled imageEntry.
+// Must be called after all WriteTile calls have populated entry.tileOffsets
+// and entry.tileCounts.
+func (w *Writer) buildTiledTags(entry *imageEntry) error {
+	s := entry.spec
+
+	// Convert uint64 slices to uint32 for classic TIFF LONG arrays.
+	// (BigTIFF LONG8 is Task 6's concern.)
+	offsets := make([]uint32, len(entry.tileOffsets))
+	for i, v := range entry.tileOffsets {
+		if v > 0xFFFFFFFF {
+			return fmt.Errorf("wsiwriter: tile offset %d exceeds 4 GiB — use BigTIFF", v)
+		}
+		offsets[i] = uint32(v)
+	}
+	counts := make([]uint32, len(entry.tileCounts))
+	for i, v := range entry.tileCounts {
+		if v > 0xFFFFFFFF {
+			return fmt.Errorf("wsiwriter: tile byte count %d exceeds 4 GiB — use BigTIFF", v)
+		}
+		counts[i] = uint32(v)
+	}
+
+	bps := []uint16{8, 8, 8}
+	spp := s.SamplesPerPixel
+	if spp == 0 {
+		spp = 3
+	}
+
+	tags := []ifdTag{
+		w.makeLongTag(256, s.ImageWidth),                 // ImageWidth
+		w.makeLongTag(257, s.ImageHeight),                // ImageLength
+		w.makeShortsTag(258, bps),                        // BitsPerSample [8,8,8]
+		w.makeShortTag(259, s.Compression),               // Compression
+		w.makeShortTag(262, s.PhotometricInterpretation), // PhotometricInterpretation
+		w.makeShortTag(277, spp),                         // SamplesPerPixel
+		w.makeLongTag(322, s.TileWidth),                  // TileWidth
+		w.makeLongTag(323, s.TileHeight),                 // TileLength
+		w.makeLongsTag(324, offsets),                     // TileOffsets
+		w.makeLongsTag(325, counts),                      // TileByteCounts
+		w.makeShortTag(284, 1),                           // PlanarConfiguration = chunky
+	}
+
+	// Optional: NewSubfileType (tag 254), only emit when non-zero.
+	if s.NewSubfileType != 0 {
+		tags = append(tags, w.makeLongTag(254, s.NewSubfileType))
+	}
+
+	// Optional: JPEGTables (tag 347, type UNDEFINED).
+	if len(s.JPEGTables) > 0 {
+		tags = append(tags, w.makeUndefinedTag(347, s.JPEGTables))
+	}
+
+	// Optional: ICCProfile (tag 34675, type UNDEFINED).
+	if len(s.ICCProfile) > 0 {
+		tags = append(tags, w.makeUndefinedTag(34675, s.ICCProfile))
+	}
+
+	// Caller-supplied extra tags (emitted verbatim).
+	for _, et := range s.ExtraTags {
+		b := make([]byte, len(et.Value))
+		copy(b, et.Value)
+		tags = append(tags, ifdTag{
+			tag:   et.Tag,
+			typ:   et.Type,
+			count: et.Count,
+			value: b,
+		})
+	}
+
+	entry.tags = tags
+	return nil
 }
