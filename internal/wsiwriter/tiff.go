@@ -10,22 +10,24 @@ import (
 
 // Writer writes a TIFF file. Construct via Create.
 type Writer struct {
-	path     string
-	tmpPath  string
-	f        *os.File
-	bo       binary.ByteOrder
-	bigtiff  bool
-	wordSize int // 4 for classic TIFF, 8 for BigTIFF
-	imgs     []*imageEntry
-	closed   bool
+	path             string
+	tmpPath          string
+	f                *os.File
+	bo               binary.ByteOrder
+	bigtiff          bool
+	wordSize         int // 4 for classic TIFF, 8 for BigTIFF
+	imgs             []*imageEntry
+	closed           bool
+	imageDescription string // optional; emitted as tag 270 on L0 only
 }
 
 // Option is a functional option for Create.
 type Option func(*writerConfig)
 
 type writerConfig struct {
-	bo      binary.ByteOrder
-	bigtiff bool
+	bo               binary.ByteOrder
+	bigtiff          bool
+	imageDescription string
 }
 
 // WithByteOrder sets the byte order for the TIFF file (default: LittleEndian).
@@ -33,6 +35,12 @@ func WithByteOrder(bo binary.ByteOrder) Option { return func(c *writerConfig) { 
 
 // WithBigTIFF enables BigTIFF mode (8-byte offsets, 0x002B magic).
 func WithBigTIFF(b bool) Option { return func(c *writerConfig) { c.bigtiff = b } }
+
+// WithImageDescription sets the TIFF ImageDescription tag (270) written on the
+// first IFD (L0) only. Used by Aperio SVS to embed slide metadata.
+func WithImageDescription(s string) Option {
+	return func(c *writerConfig) { c.imageDescription = s }
+}
 
 // imageEntry holds the data for one IFD to be written.
 // If spec is non-nil the entry is tiled (AddLevel); if nil it is stripped (AddStrippedImage).
@@ -58,6 +66,7 @@ type ifdTag struct {
 
 // TIFF type constants.
 const (
+	tiffTypeASCII     = uint16(2)  // TIFF type 2: null-terminated ASCII string
 	tiffTypeSHORT     = uint16(3)
 	tiffTypeLONG      = uint16(4)
 	tiffTypeUNDEFINED = uint16(7)  // TIFF type 7: arbitrary byte data (JPEGTables, ICCProfile)
@@ -80,7 +89,7 @@ func Create(path string, opts ...Option) (*Writer, error) {
 	if cfg.bigtiff {
 		wordSize = 8
 	}
-	w := &Writer{path: path, tmpPath: tmp, f: f, bo: cfg.bo, bigtiff: cfg.bigtiff, wordSize: wordSize}
+	w := &Writer{path: path, tmpPath: tmp, f: f, bo: cfg.bo, bigtiff: cfg.bigtiff, wordSize: wordSize, imageDescription: cfg.imageDescription}
 	if err := w.writeHeader(); err != nil {
 		f.Close()
 		os.Remove(tmp)
@@ -662,6 +671,14 @@ func (w *Writer) makeUndefinedTag(tag uint16, data []byte) ifdTag {
 	return ifdTag{tag: tag, typ: tiffTypeUNDEFINED, count: uint64(len(data)), value: b}
 }
 
+// makeASCIITag creates an ifdTag for a null-terminated ASCII string (TIFF type 2).
+// TIFF spec: count includes the null terminator; values longer than the inline
+// limit will be written out-of-band by writeOutOfBandValues.
+func (w *Writer) makeASCIITag(tag uint16, s string) ifdTag {
+	b := []byte(s + "\x00")
+	return ifdTag{tag: tag, typ: tiffTypeASCII, count: uint64(len(b)), value: b}
+}
+
 // buildTiledTags constructs the IFD tag list for a tiled imageEntry.
 // Must be called after all WriteTile calls have populated entry.tileOffsets
 // and entry.tileCounts. isL0 indicates whether this is the first (L0) IFD,
@@ -718,6 +735,11 @@ func (w *Writer) buildTiledTags(entry *imageEntry, isL0 bool) error {
 	// Optional: NewSubfileType (tag 254), only emit when non-zero.
 	if s.NewSubfileType != 0 {
 		tags = append(tags, w.makeLongTag(254, s.NewSubfileType))
+	}
+
+	// Optional: ImageDescription (tag 270, ASCII) — emitted on L0 only.
+	if isL0 && w.imageDescription != "" {
+		tags = append(tags, w.makeASCIITag(270, w.imageDescription))
 	}
 
 	// Optional: JPEGTables (tag 347, type UNDEFINED).

@@ -243,3 +243,25 @@ func TestAddAssociated(t *testing.T) {
 		t.Errorf("expected ≥2 IFDs, got:\n%s", got)
 	}
 }
+
+func TestImageDescription(t *testing.T) {
+	if _, err := exec.LookPath("tiffinfo"); err != nil {
+		t.Skip("tiffinfo missing")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "with-desc.tiff")
+	desc := "Aperio Image Library v12.0.15\r\n8x8 [...] |MPP = 1.0 |AppMag = 20"
+	w, _ := Create(path, WithBigTIFF(true), WithImageDescription(desc))
+	level, _ := w.AddLevel(LevelSpec{
+		ImageWidth: 8, ImageHeight: 8, TileWidth: 8, TileHeight: 8,
+		Compression: CompressionNone, PhotometricInterpretation: 2,
+	})
+	level.WriteTile(0, 0, make([]byte, 8*8*3))
+	w.Close()
+
+	out, _ := exec.Command("tiffinfo", path).CombinedOutput()
+	got := string(out)
+	if !strings.Contains(got, "AppMag = 20") {
+		t.Errorf("ImageDescription not in output:\n%s", got)
+	}
+}
