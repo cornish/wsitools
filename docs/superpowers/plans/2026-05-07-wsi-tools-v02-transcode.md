@@ -6,7 +6,7 @@
 
 **Architecture:** Per-tile streaming end-to-end: source bytes → decode (libjpeg-turbo or OpenJPEG, both already shipped) → identity pixel pass → encode (5 new codec wrappers via cgo) → write (existing `wsiwriter` plus new WSI metadata tags). No raster materialisation. Memory ceiling: workers × tile_bytes × 2, independent of slide size.
 
-**Tech Stack:** Go 1.26+, `github.com/cornish/opentile-go` v0.11.x (the read side), `spf13/cobra` (CLI), libjxl (jpegli + jpegxl), libavif, libwebp, OpenJPH (cgo), libjpeg-turbo (encode/decode, already shipped), OpenJPEG (decode, already shipped), `vbauerster/mpb/v8` (progress), stdlib `log/slog`.
+**Tech Stack:** Go 1.26+, `github.com/cornish/opentile-go` v0.12.0 (the read side), `spf13/cobra` (CLI), libjxl (jpegli + jpegxl), libavif, libwebp, OpenJPH (cgo), libjpeg-turbo (encode/decode, already shipped), OpenJPEG (decode, already shipped), `vbauerster/mpb/v8` (progress), stdlib `log/slog`.
 
 **Spec:** `docs/superpowers/specs/2026-05-07-wsi-tools-v02-design.md`
 
@@ -76,9 +76,9 @@ wsi-tools/
 
 ---
 
-## Batch A — opentile-go v0.11 bump + Format constants migration (2 tasks)
+## Batch A — opentile-go v0.12 bump + Format constants migration (2 tasks)
 
-### Task A1: Bump opentile-go to v0.11 and verify
+### Task A1: Bump opentile-go to v0.12 and verify
 
 **Files:**
 - Modify: `go.mod`, `go.sum`
@@ -87,10 +87,10 @@ wsi-tools/
 
 ```bash
 cd /Users/cornish/GitHub/wsi-tools
-go get github.com/cornish/opentile-go@v0.11.0
+go get github.com/cornish/opentile-go@v0.12.0
 ```
 
-Expected: `go.mod` shows `github.com/cornish/opentile-go v0.11.0`. If v0.11.0 isn't tagged yet, use `@latest`; if neither resolves cleanly, escalate as BLOCKED.
+Expected: `go.mod` shows `github.com/cornish/opentile-go v0.12.0`. v0.12 renames `Format` constants for Philips and OME (`FormatPhilipsTIFF` = `"philips-tiff"`, `FormatOMETIFF` = `"ome-tiff"`) and adds `FormatLeicaSCN` = `"leica-scn"`. Test surface unchanged otherwise.
 
 - [ ] **Step 2: Verify nothing in v0.1 broke**
 
@@ -122,34 +122,42 @@ grep -rn "Format()" --include="*.go" .
 
 Expected: at least one hit in `cmd/wsi-tools/downsample.go` checking `src.Format() != "svs"`. Note the line numbers.
 
-- [ ] **Step 2: Look up the v0.11 Format constant names**
+- [ ] **Step 2: Verify the v0.12 Format constant names**
 
-```bash
-grep -E "^const|Format[A-Z]" $HOME/go/pkg/mod/github.com/cornish/opentile-go@v0.11.*/opentile.go | head -20
+The names are pinned (verified during v0.2 brainstorming):
+
+```
+opentile.FormatSVS         = "svs"
+opentile.FormatNDPI        = "ndpi"
+opentile.FormatPhilipsTIFF = "philips-tiff"
+opentile.FormatOMETIFF     = "ome-tiff"
+opentile.FormatBIF         = "bif"
+opentile.FormatIFE         = "ife"
+opentile.FormatGenericTIFF = "generic-tiff"
+opentile.FormatLeicaSCN    = "leica-scn"
 ```
 
-If that doesn't find them, look at `$HOME/go/pkg/mod/github.com/cornish/opentile-go@v0.11.*/` directly:
+If any of these names differ in your local v0.12.x checkout, adjust the references in the rest of the plan (the difference would only manifest as a compile error during Task B2 when the sanity-gate switch is wired up).
+
+Quick sanity check:
 
 ```bash
-ls $HOME/go/pkg/mod/github.com/cornish/opentile-go@v0.11.*/
-grep -rE "Format[A-Z][A-Za-z]+ +[A-Z]?" $HOME/go/pkg/mod/github.com/cornish/opentile-go@v0.11.*/opentile.go
+grep -E "Format[A-Z][A-Za-z]+ Format = " $HOME/go/pkg/mod/github.com/cornish/opentile-go@v0.12.0/tiler.go
 ```
 
-Confirm the names of the SVS, Philips-TIFF, OME-TIFF, BIF, IFE, generic-TIFF, NDPI constants. Likely `opentile.FormatSVS`, `opentile.FormatPhilipsTIFF`, etc.
+Expected: prints all 8 constants matching the list above.
 
 - [ ] **Step 3: Modify downsample.go to use the constant**
 
-In `cmd/wsi-tools/downsample.go`, find the line `if src.Format() != "svs" {` and replace with:
+`opentile.Format` is a typed string in v0.12, so we compare with `==` directly (no `string(...)` cast needed). In `cmd/wsi-tools/downsample.go`, find the line `if src.Format() != "svs" {` and replace with:
 
 ```go
 import opentile "github.com/cornish/opentile-go"
 // ...
-if src.Format() != string(opentile.FormatSVS) {
+if src.Format() != opentile.FormatSVS {
     return fmt.Errorf("v0.1 downsample supports SVS only, got %q", src.Format())
 }
 ```
-
-(If `opentile.Format()` returns the constant type directly rather than a string, drop the `string(...)` cast and compare directly.)
 
 - [ ] **Step 4: Verify build + tests**
 
@@ -370,6 +378,19 @@ func TestOpen_NDPI_Rejects(t *testing.T) {
 	}
 }
 
+func TestOpen_LeicaSCN_Rejects(t *testing.T) {
+	td := testdir(t)
+	// opentile-go's sample fixture directory is `scn/` (not `leica-scn/`).
+	candidate := filepath.Join(td, "scn", "Leica-1.scn")
+	if _, err := os.Stat(candidate); err != nil {
+		t.Skipf("Leica SCN fixture missing: %v", err)
+	}
+	_, err := Open(candidate)
+	if !errors.Is(err, ErrUnsupportedFormat) {
+		t.Errorf("expected ErrUnsupportedFormat, got %v", err)
+	}
+}
+
 func TestOpen_NotATIFF(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "garbage.bin")
@@ -417,7 +438,13 @@ func Open(path string) (Source, error) {
 	switch t.Format() {
 	case opentile.FormatNDPI:
 		t.Close()
-		return nil, fmt.Errorf("%w: NDPI", ErrUnsupportedFormat)
+		return nil, fmt.Errorf("%w: NDPI (striped MCU streams have no source tile geometry)", ErrUnsupportedFormat)
+	case opentile.FormatLeicaSCN:
+		// SCN supports multi-image (multiple disjoint tissue rectangles per
+		// slide) and multi-channel (fluorescence) — neither fits the v0.2.0
+		// single-pyramid streaming model. Reject; revisit at v0.2.x.
+		t.Close()
+		return nil, fmt.Errorf("%w: Leica SCN (multi-image / multi-channel deferred to v0.2.x)", ErrUnsupportedFormat)
 	case opentile.FormatOMETIFF:
 		// OneFrame OMEs report TileSize == zero on all levels.
 		if oneFrameOME(t) {
@@ -3102,8 +3129,9 @@ func TestTranscode_PerSourceFormat_ToJPEGXL(t *testing.T) {
 		{"ome-tiled", filepath.Join(td, "ome-tiff", "Leica-1.ome.tiff"), true},
 		{"bif", filepath.Join(td, "bif", "Ventana-1.bif"), true},
 		{"ife", filepath.Join(td, "ife", "cervix_2x_jpeg.iris"), true},
-		{"generic-tiff", filepath.Join(td, "generictiff", "CMU-1.tiff"), true},
+		{"generic-tiff", filepath.Join(td, "generic-tiff", "CMU-1.tiff"), true},
 		{"ndpi-rejection", filepath.Join(td, "ndpi", "CMU-1.ndpi"), false},
+		{"leica-scn-rejection", filepath.Join(td, "scn", "Leica-1.scn"), false},
 	}
 	for _, c := range cases {
 		c := c

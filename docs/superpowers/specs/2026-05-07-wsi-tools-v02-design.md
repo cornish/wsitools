@@ -14,7 +14,7 @@ Ship `wsi-tools transcode` end-to-end on a useful subset of WSI source formats a
 
 - `wsi-tools transcode` subcommand (cobra).
 - **5 new codec wrappers**: **JPEG-XL** (libjxl), **jpegli** (libjxl), **AVIF** (libavif), **WebP** (libwebp), **HTJ2K** (OpenJPH). The `jpeg` codec from v0.1 also becomes available as a transcode target for free (re-encode at a different `--quality`), bringing the transcode CLI's `--codec` flag to 6 accepted values total.
-- 6 sane source formats: **SVS, Philips-TIFF, OME-TIFF (tiled SubIFD path), BIF, IFE, generic-TIFF**. NDPI + OME-OneFrame reject cleanly with `ErrUnsupportedFormat`.
+- 6 sane source formats: **SVS, Philips-TIFF, OME-TIFF (tiled SubIFD path), BIF, IFE, generic-TIFF**. NDPI, OME-OneFrame, and Leica SCN reject cleanly with `ErrUnsupportedFormat` (Leica SCN's multi-image + multi-channel structure is out of scope for v0.2.0's single-pyramid streaming model).
 - **Streaming pyramid build** — per-tile decode → encode → write, no L0 raster materialisation. Memory ceiling drops three orders of magnitude vs. v0.1 downsample.
 - New private TIFF tags `WSIImageType` (65080) + `WSILevelIndex` (65081) + `WSILevelCount` (65082) + `WSISourceFormat` (65083) + `WSIToolsVersion` (65084) for self-describing output.
 - Standard TIFF metadata tags (Make / Model / Software / DateTime) populated from opentile-go's cross-format metadata.
@@ -44,8 +44,8 @@ Ship `wsi-tools transcode` end-to-end on a useful subset of WSI source formats a
 
 ## Constraints / decisions made during brainstorming
 
-- **Reader = `github.com/cornish/opentile-go` v0.11.x.** v0.11 (shipping the same day as this spec) renames the `philips` and `ome` format strings to disambiguate variants. wsi-tools references opentile-go's exported `Format*` constants (`opentile.FormatSVS`, `opentile.FormatPhilipsTIFF`, `opentile.FormatOMETIFF`, `opentile.FormatBIF`, `opentile.FormatIFE`, `opentile.FormatGenericTIFF`, `opentile.FormatNDPI`) rather than literal strings, so future renames stay mechanical.
-- **Source-format sanity gate** lives in a new `internal/source` package. Reject NDPI outright (no source tile geometry — striped MCU streams). Reject OME-TIFF when the OneFrame path is detected (same shape as NDPI's striped layout — synthesised tiles, not stored ones).
+- **Reader = `github.com/cornish/opentile-go` v0.12.x.** v0.12 renames the `philips` and `ome` format strings to disambiguate variants (now `philips-tiff` and `ome-tiff`). v0.11 also added `FormatLeicaSCN`. wsi-tools references opentile-go's exported `Format*` constants (`opentile.FormatSVS`, `opentile.FormatPhilipsTIFF`, `opentile.FormatOMETIFF`, `opentile.FormatBIF`, `opentile.FormatIFE`, `opentile.FormatGenericTIFF`, `opentile.FormatNDPI`, `opentile.FormatLeicaSCN`) rather than literal strings, so future renames stay mechanical.
+- **Source-format sanity gate** lives in a new `internal/source` package. Reject NDPI outright (no source tile geometry — striped MCU streams). Reject OME-TIFF when the OneFrame path is detected (same shape as NDPI's striped layout — synthesised tiles, not stored ones). Reject Leica SCN at v0.2.0 (multi-image + multi-channel structure requires per-Image / per-channel pipeline plumbing we don't ship until v0.2.x).
 - **BIF is in.** Serpentine remap + L0 horizontal overlap are real but opentile-go normalises the read interface; we just preserve the source's tile geometry verbatim.
 - **Streaming end-to-end.** Transcode has no inter-level dependency, so each level is a streamed tile pass: decode → encode → write. No raster intermediate. Memory ceiling: `~workers × tile_bytes × 2` (decoded + encoded buffers per worker), independent of slide size.
 - **Output container per source/codec:**
@@ -378,7 +378,7 @@ Source decoders:
   ✓ jpeg      (libjpeg-turbo 3.0.4)
   ✓ jpeg2000  (openjpeg 2.5.4)
 
-Required: opentile-go v0.11.0 ✓
+Required: opentile-go v0.12.0 ✓
 ```
 
 Each codec line shows the underlying library version where the library exposes it (libjxl, libavif, libwebp via runtime version macros; OpenJPH via header macro). Missing libs reported as `✗` with a one-line install hint.
@@ -444,7 +444,7 @@ Identical surface to v0.1 plus:
 
 ## Build / packaging
 
-- **`go.mod`**: bump `github.com/cornish/opentile-go` to `v0.11.x` (or `v0.11.0` once tagged).
+- **`go.mod`**: bump `github.com/cornish/opentile-go` to `v0.12.x` (or `v0.11.0` once tagged).
 - **macOS workflow** (`.github/workflows/ci.yml`):
   - `brew install jpeg-turbo openjpeg jpeg-xl libavif webp openjph pkg-config libtiff`.
   - Run `go build`, `go vet`, `go test ./... -race -count=1`.
@@ -467,12 +467,13 @@ Identical surface to v0.1 plus:
 - v0.2.1: add HEIF, JPEG-LS, JPEG-XR codecs (HEIF via libheif; JPEG-LS via CharLS; JPEG-XR via jxrlib source build). Also add `--re-encode-associated` flag if a use case surfaces.
 - v0.2.2: add Basis Universal codec (basis_universal source build + KTX2 wrapping). Add jpeg + jpeg2000 as transcode targets (decoders already shipped at v0.1).
 - v0.2.3: streaming retrofit for `downsample` — eliminate the full L0 raster materialisation by interleaving decode + resample + encode into a single streaming pass per output level.
+- v0.2.x: Leica SCN source support — single-image single-channel SCNs first (the simplest subset), then multi-image (per-`Image` parallel pyramids) and multi-channel (`SizeC > 1` fluorescence) as separate steps.
 - v0.3: NDPI + OME-OneFrame source support via virtual-tile materialisation; libjpeg `longjmp` error recovery; Linux CI; cross-codec round-trip tests.
 - v0.4: GUI front-end; absorption of `cornish/wsi-label-tools`.
 
 ## References
 
-- **opentile-go v0.11** — `github.com/cornish/opentile-go` (the read side; v0.11 introduces format-string disambiguation for Philips and OME variants).
+- **opentile-go v0.12** — `github.com/cornish/opentile-go` (the read side; v0.11 introduces format-string disambiguation for Philips and OME variants).
 - **opentile-go SVS classifier** — `formats/svs/series.go:classifyPages`. Authoritative on the IFD ordering rule used by SVS-shaped output.
 - **opentile-go generic-TIFF classifier** — `formats/generictiff/classifier.go`. Heuristic for trailing IFD classification; `WSIImageType` tag 65080 is the future-explicit override path.
 - **DICOM Whole Slide Imaging (PS3.3 Sup. 145)** — basis for the `WSIImageType` value vocabulary (DICOM uses VOLUME / LABEL / OVERVIEW / THUMBNAIL; we use lowercase + a few extensions for opentile-go's broader Kind set).
