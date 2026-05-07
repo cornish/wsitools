@@ -3,7 +3,9 @@ package wsiwriter
 import (
 	"image"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	xtiff "golang.org/x/image/tiff"
@@ -69,6 +71,49 @@ func TestWriteTiledTIFF(t *testing.T) {
 	r1, g1, b1, _ := img.At(8, 8).RGBA()
 	if r0 == r1 && g0 == g1 && b0 == b1 {
 		t.Errorf("tile (0,0) and (1,1) have identical pixels — tile layout wrong")
+	}
+}
+
+// TestWriteBigTIFF writes a 16x16 RGB tiled BigTIFF and validates it using
+// tiffinfo (libtiff's CLI tool). golang.org/x/image/tiff cannot read BigTIFF,
+// so we shell out. The test is skipped if tiffinfo is not in PATH.
+func TestWriteBigTIFF(t *testing.T) {
+	if _, err := exec.LookPath("tiffinfo"); err != nil {
+		t.Skip("tiffinfo not in PATH (brew install libtiff); skipping")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.tiff")
+
+	w, err := Create(path, WithBigTIFF(true))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	level, err := w.AddLevel(LevelSpec{
+		ImageWidth: 16, ImageHeight: 16,
+		TileWidth: 8, TileHeight: 8,
+		Compression: CompressionNone, PhotometricInterpretation: 2,
+	})
+	if err != nil {
+		t.Fatalf("AddLevel: %v", err)
+	}
+	for ty := uint32(0); ty < 2; ty++ {
+		for tx := uint32(0); tx < 2; tx++ {
+			if err := level.WriteTile(tx, ty, make([]byte, 8*8*3)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command("tiffinfo", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("tiffinfo: %v\n%s", err, out)
+	}
+	got := string(out)
+	if !strings.Contains(got, "BigTIFF") && !strings.Contains(got, "Subfile") {
+		t.Errorf("tiffinfo output doesn't mention BigTIFF or expected fields:\n%s", got)
 	}
 }
 

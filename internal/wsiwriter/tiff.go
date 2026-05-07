@@ -10,13 +10,14 @@ import (
 
 // Writer writes a TIFF file. Construct via Create.
 type Writer struct {
-	path    string
-	tmpPath string
-	f       *os.File
-	bo      binary.ByteOrder
-	bigtiff bool
-	imgs    []*imageEntry
-	closed  bool
+	path     string
+	tmpPath  string
+	f        *os.File
+	bo       binary.ByteOrder
+	bigtiff  bool
+	wordSize int // 4 for classic TIFF, 8 for BigTIFF
+	imgs     []*imageEntry
+	closed   bool
 }
 
 // Option is a functional option for Create.
@@ -59,7 +60,8 @@ type ifdTag struct {
 const (
 	tiffTypeSHORT     = uint16(3)
 	tiffTypeLONG      = uint16(4)
-	tiffTypeUNDEFINED = uint16(7) // TIFF type 7: arbitrary byte data (JPEGTables, ICCProfile)
+	tiffTypeUNDEFINED = uint16(7)  // TIFF type 7: arbitrary byte data (JPEGTables, ICCProfile)
+	tiffTypeLONG8     = uint16(16) // BigTIFF-only: 8-byte unsigned integer (for tile/strip offsets)
 )
 
 // Create opens a new TIFF file for writing. The file is created at path+".tmp"
@@ -74,7 +76,11 @@ func Create(path string, opts ...Option) (*Writer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wsiwriter: create tmp: %w", err)
 	}
-	w := &Writer{path: path, tmpPath: tmp, f: f, bo: cfg.bo, bigtiff: cfg.bigtiff}
+	wordSize := 4
+	if cfg.bigtiff {
+		wordSize = 8
+	}
+	w := &Writer{path: path, tmpPath: tmp, f: f, bo: cfg.bo, bigtiff: cfg.bigtiff, wordSize: wordSize}
 	if err := w.writeHeader(); err != nil {
 		f.Close()
 		os.Remove(tmp)
@@ -266,7 +272,7 @@ func (w *Writer) Close() error {
 
 		// 3. Back-patch previous IFD's next-IFD field.
 		if i > 0 {
-			if err := w.patchUint32(nextIFDPatchAt[i-1], uint32(start)); err != nil {
+			if err := w.patchOffset(nextIFDPatchAt[i-1], uint64(start)); err != nil {
 				w.f.Close()
 				return fmt.Errorf("wsiwriter: patch next-IFD for IFD %d: %w", i-1, err)
 			}
@@ -281,12 +287,18 @@ func (w *Writer) Close() error {
 		nextIFDPatchAt[i] = patchAt
 	}
 
-	// Back-patch the first-IFD offset in the file header (classic TIFF: bytes 4-7).
-	var firstIFDOffset uint32
+	// Back-patch the first-IFD offset in the file header.
+	//   Classic TIFF: bytes 4-7 (4-byte uint32).
+	//   BigTIFF:      bytes 8-15 (8-byte uint64, after the 8-byte BigTIFF preamble).
+	var firstIFDOffset uint64
 	if len(ifdStarts) > 0 {
-		firstIFDOffset = uint32(ifdStarts[0])
+		firstIFDOffset = uint64(ifdStarts[0])
 	}
-	if err := w.patchUint32(4, firstIFDOffset); err != nil {
+	firstIFDPatchAt := int64(4)
+	if w.bigtiff {
+		firstIFDPatchAt = 8
+	}
+	if err := w.patchOffset(firstIFDPatchAt, firstIFDOffset); err != nil {
 		w.f.Close()
 		return fmt.Errorf("wsiwriter: patch first-IFD offset: %w", err)
 	}
@@ -317,6 +329,34 @@ func (w *Writer) patchUint32(at int64, val uint32) error {
 		return fmt.Errorf("seek back to end after patch: %w", err)
 	}
 	return nil
+}
+
+// patchUint64 seeks to the given absolute file offset, writes a uint64 in w.bo,
+// then seeks back to the end of the file.
+func (w *Writer) patchUint64(at int64, val uint64) error {
+	end, err := w.currentOffset()
+	if err != nil {
+		return err
+	}
+	if _, err := w.f.Seek(at, 0); err != nil {
+		return fmt.Errorf("seek to patch offset %d: %w", at, err)
+	}
+	if err := binary.Write(w.f, w.bo, val); err != nil {
+		return fmt.Errorf("write patch value at %d: %w", at, err)
+	}
+	if _, err := w.f.Seek(end, 0); err != nil {
+		return fmt.Errorf("seek back to end after patch: %w", err)
+	}
+	return nil
+}
+
+// patchOffset writes a wordSize-wide value at the given file offset: u32 for
+// classic TIFF, u64 for BigTIFF. Restores the write position afterward.
+func (w *Writer) patchOffset(at int64, val uint64) error {
+	if w.wordSize == 8 {
+		return w.patchUint64(at, val)
+	}
+	return w.patchUint32(at, uint32(val))
 }
 
 // writeHeader writes the 8-byte classic TIFF header (or 16-byte BigTIFF header).
@@ -364,11 +404,12 @@ func (w *Writer) writeHeader() error {
 	return nil
 }
 
-// writeOutOfBandValues writes tag values that exceed the 4-byte inline limit
-// to the current end of file, replacing the tag's value field with a 4-byte
-// offset pointer. Called for each imageEntry before emitting its IFD.
+// writeOutOfBandValues writes tag values that exceed the inline limit
+// to the current end of file, replacing the tag's value field with an offset
+// pointer. The inline limit is w.wordSize bytes (4 for classic, 8 for BigTIFF).
+// Called for each imageEntry before emitting its IFD.
 func (w *Writer) writeOutOfBandValues(entry *imageEntry) error {
-	const inlineLimit = 4
+	inlineLimit := w.wordSize
 
 	for i := range entry.tags {
 		t := &entry.tags[i]
@@ -380,49 +421,81 @@ func (w *Writer) writeOutOfBandValues(entry *imageEntry) error {
 			if _, err := w.f.Write(t.value); err != nil {
 				return fmt.Errorf("tag %d out-of-band write: %w", t.tag, err)
 			}
-			// Replace value bytes with a 4-byte offset pointer.
-			ptr := make([]byte, 4)
-			w.bo.PutUint32(ptr, uint32(off))
+			// Replace value bytes with a wordSize-byte offset pointer.
+			ptr := make([]byte, w.wordSize)
+			if w.wordSize == 8 {
+				w.bo.PutUint64(ptr, uint64(off))
+			} else {
+				w.bo.PutUint32(ptr, uint32(off))
+			}
 			t.value = ptr
 		}
 	}
 	return nil
 }
 
-// emitIFD writes one IFD to the file: entry count (2B), N×12-byte sorted entries,
-// next-IFD offset (4B, written as 0 placeholder). Returns the file offset of the
-// next-IFD field so the caller can back-patch it for IFD chaining.
+// emitIFD writes one IFD to the file. For classic TIFF: entry count (2B),
+// N×12-byte sorted entries, next-IFD offset (4B). For BigTIFF: entry count
+// (8B), N×20-byte sorted entries, next-IFD offset (8B). Returns the file
+// offset of the next-IFD field so the caller can back-patch it for IFD chaining.
 func (w *Writer) emitIFD(entry *imageEntry) (nextIFDPatchOffset int64, _ error) {
 	// Sort entries by tag number (TIFF spec requirement, §2).
 	tags := make([]ifdTag, len(entry.tags))
 	copy(tags, entry.tags)
 	sort.Slice(tags, func(i, j int) bool { return tags[i].tag < tags[j].tag })
 
-	// Write entry count (2 bytes).
-	if err := binary.Write(w.f, w.bo, uint16(len(tags))); err != nil {
-		return 0, fmt.Errorf("write IFD entry count: %w", err)
-	}
-
-	// Write each 12-byte entry: tag(2) + type(2) + count(4) + value/offset(4).
-	for _, t := range tags {
-		if err := binary.Write(w.f, w.bo, t.tag); err != nil {
-			return 0, fmt.Errorf("write tag %d field: %w", t.tag, err)
+	if w.bigtiff {
+		// BigTIFF entry count: 8 bytes (uint64).
+		if err := binary.Write(w.f, w.bo, uint64(len(tags))); err != nil {
+			return 0, fmt.Errorf("write IFD entry count: %w", err)
 		}
-		if err := binary.Write(w.f, w.bo, t.typ); err != nil {
-			return 0, fmt.Errorf("write tag %d type: %w", t.tag, err)
+		// BigTIFF entry: tag(2) + type(2) + count(8) + value/offset(8) = 20 bytes.
+		for _, t := range tags {
+			if err := binary.Write(w.f, w.bo, t.tag); err != nil {
+				return 0, fmt.Errorf("write tag %d field: %w", t.tag, err)
+			}
+			if err := binary.Write(w.f, w.bo, t.typ); err != nil {
+				return 0, fmt.Errorf("write tag %d type: %w", t.tag, err)
+			}
+			if err := binary.Write(w.f, w.bo, t.count); err != nil {
+				return 0, fmt.Errorf("write tag %d count: %w", t.tag, err)
+			}
+			// Value/offset field (8 bytes). t.value is ≤8 bytes at this point
+			// (out-of-band values have been resolved to 8-byte pointers).
+			// Inline values are left-justified; copy fills from the start,
+			// leaving trailing zeros — correct for both LE and BE.
+			var padded [8]byte
+			copy(padded[:], t.value)
+			if _, err := w.f.Write(padded[:]); err != nil {
+				return 0, fmt.Errorf("write tag %d value: %w", t.tag, err)
+			}
 		}
-		if err := binary.Write(w.f, w.bo, uint32(t.count)); err != nil {
-			return 0, fmt.Errorf("write tag %d count: %w", t.tag, err)
+	} else {
+		// Classic TIFF entry count: 2 bytes (uint16).
+		if err := binary.Write(w.f, w.bo, uint16(len(tags))); err != nil {
+			return 0, fmt.Errorf("write IFD entry count: %w", err)
 		}
-		// Value/offset field (4 bytes). t.value is ≤4 bytes at this point
-		// (out-of-band values have been resolved to 4-byte pointers).
-		// TIFF spec: inline values are left-justified in the 4-byte field
-		// (i.e. stored at the lowest address). copy fills from the start,
-		// leaving trailing zeros — correct for both LE and BE.
-		var padded [4]byte
-		copy(padded[:], t.value)
-		if _, err := w.f.Write(padded[:]); err != nil {
-			return 0, fmt.Errorf("write tag %d value: %w", t.tag, err)
+		// Classic entry: tag(2) + type(2) + count(4) + value/offset(4) = 12 bytes.
+		for _, t := range tags {
+			if err := binary.Write(w.f, w.bo, t.tag); err != nil {
+				return 0, fmt.Errorf("write tag %d field: %w", t.tag, err)
+			}
+			if err := binary.Write(w.f, w.bo, t.typ); err != nil {
+				return 0, fmt.Errorf("write tag %d type: %w", t.tag, err)
+			}
+			if err := binary.Write(w.f, w.bo, uint32(t.count)); err != nil {
+				return 0, fmt.Errorf("write tag %d count: %w", t.tag, err)
+			}
+			// Value/offset field (4 bytes). t.value is ≤4 bytes at this point
+			// (out-of-band values have been resolved to 4-byte pointers).
+			// TIFF spec: inline values are left-justified in the 4-byte field
+			// (i.e. stored at the lowest address). copy fills from the start,
+			// leaving trailing zeros — correct for both LE and BE.
+			var padded [4]byte
+			copy(padded[:], t.value)
+			if _, err := w.f.Write(padded[:]); err != nil {
+				return 0, fmt.Errorf("write tag %d value: %w", t.tag, err)
+			}
 		}
 	}
 
@@ -432,8 +505,15 @@ func (w *Writer) emitIFD(entry *imageEntry) (nextIFDPatchOffset int64, _ error) 
 		return 0, err
 	}
 	// Write next-IFD offset placeholder (0 = last IFD; caller patches if chaining).
-	if err := binary.Write(w.f, w.bo, uint32(0)); err != nil {
-		return 0, fmt.Errorf("write next-IFD offset: %w", err)
+	// Classic: 4-byte uint32; BigTIFF: 8-byte uint64.
+	if w.bigtiff {
+		if err := binary.Write(w.f, w.bo, uint64(0)); err != nil {
+			return 0, fmt.Errorf("write next-IFD offset: %w", err)
+		}
+	} else {
+		if err := binary.Write(w.f, w.bo, uint32(0)); err != nil {
+			return 0, fmt.Errorf("write next-IFD offset: %w", err)
+		}
 	}
 
 	return patchOffset, nil
@@ -480,6 +560,19 @@ func (w *Writer) makeLongsTag(tag uint16, vals []uint32) ifdTag {
 	return ifdTag{tag: tag, typ: tiffTypeLONG, count: uint64(len(vals)), value: b}
 }
 
+// makeLong8sTag creates an ifdTag for a slice of LONG8 (uint64) values.
+// LONG8 (type code 16) is a BigTIFF-only type for 8-byte unsigned integers.
+// Used for TileOffsets/TileByteCounts in BigTIFF mode so each value can
+// address beyond 4 GiB. Values longer than 8 bytes will be written out-of-band
+// by writeOutOfBandValues.
+func (w *Writer) makeLong8sTag(tag uint16, vals []uint64) ifdTag {
+	b := make([]byte, 8*len(vals))
+	for i, v := range vals {
+		w.bo.PutUint64(b[8*i:], v)
+	}
+	return ifdTag{tag: tag, typ: tiffTypeLONG8, count: uint64(len(vals)), value: b}
+}
+
 // makeUndefinedTag creates an ifdTag for an opaque byte blob (TIFF type UNDEFINED).
 // Values longer than 4 bytes will be written out-of-band by writeOutOfBandValues.
 func (w *Writer) makeUndefinedTag(tag uint16, data []byte) ifdTag {
@@ -494,27 +587,36 @@ func (w *Writer) makeUndefinedTag(tag uint16, data []byte) ifdTag {
 func (w *Writer) buildTiledTags(entry *imageEntry) error {
 	s := entry.spec
 
-	// Convert uint64 slices to uint32 for classic TIFF LONG arrays.
-	// (BigTIFF LONG8 is Task 6's concern.)
-	offsets := make([]uint32, len(entry.tileOffsets))
-	for i, v := range entry.tileOffsets {
-		if v > 0xFFFFFFFF {
-			return fmt.Errorf("wsiwriter: tile offset %d exceeds 4 GiB — use BigTIFF", v)
-		}
-		offsets[i] = uint32(v)
-	}
-	counts := make([]uint32, len(entry.tileCounts))
-	for i, v := range entry.tileCounts {
-		if v > 0xFFFFFFFF {
-			return fmt.Errorf("wsiwriter: tile byte count %d exceeds 4 GiB — use BigTIFF", v)
-		}
-		counts[i] = uint32(v)
-	}
-
 	bps := []uint16{8, 8, 8}
 	spp := s.SamplesPerPixel
 	if spp == 0 {
 		spp = 3
+	}
+
+	// Build TileOffsets and TileByteCounts tags.
+	// BigTIFF mode: use LONG8 (type 16, 8 bytes/value) so offsets can address >4 GiB.
+	// Classic mode: use LONG (type 4, 4 bytes/value) with range validation.
+	var offsetTag, countTag ifdTag
+	if w.bigtiff {
+		offsetTag = w.makeLong8sTag(324, entry.tileOffsets) // TileOffsets  (LONG8)
+		countTag = w.makeLong8sTag(325, entry.tileCounts)   // TileByteCounts (LONG8)
+	} else {
+		offsets := make([]uint32, len(entry.tileOffsets))
+		for i, v := range entry.tileOffsets {
+			if v > 0xFFFFFFFF {
+				return fmt.Errorf("wsiwriter: tile offset %d exceeds 4 GiB — use BigTIFF", v)
+			}
+			offsets[i] = uint32(v)
+		}
+		counts := make([]uint32, len(entry.tileCounts))
+		for i, v := range entry.tileCounts {
+			if v > 0xFFFFFFFF {
+				return fmt.Errorf("wsiwriter: tile byte count %d exceeds 4 GiB — use BigTIFF", v)
+			}
+			counts[i] = uint32(v)
+		}
+		offsetTag = w.makeLongsTag(324, offsets) // TileOffsets  (LONG)
+		countTag = w.makeLongsTag(325, counts)   // TileByteCounts (LONG)
 	}
 
 	tags := []ifdTag{
@@ -526,8 +628,8 @@ func (w *Writer) buildTiledTags(entry *imageEntry) error {
 		w.makeShortTag(277, spp),                         // SamplesPerPixel
 		w.makeLongTag(322, s.TileWidth),                  // TileWidth
 		w.makeLongTag(323, s.TileHeight),                 // TileLength
-		w.makeLongsTag(324, offsets),                     // TileOffsets
-		w.makeLongsTag(325, counts),                      // TileByteCounts
+		offsetTag,                                        // TileOffsets
+		countTag,                                         // TileByteCounts
 		w.makeShortTag(284, 1),                           // PlanarConfiguration = chunky
 	}
 
