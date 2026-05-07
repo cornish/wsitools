@@ -126,8 +126,8 @@ func runDownsample(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open source: %w", err)
 	}
 	defer src.Close()
-	if string(src.Format()) != "svs" {
-		return fmt.Errorf("v0.1 supports SVS sources only; got %s", src.Format())
+	if src.Format() != opentile.FormatSVS {
+		return fmt.Errorf("v0.1 downsample supports SVS sources only; got %s", src.Format())
 	}
 
 	// Parse source ImageDescription (read raw from TIFF tag 270 of IFD 0;
