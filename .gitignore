@@ -1,0 +1,22 @@
+# Sample fixture pool — soft-link to opentile-go's local sample_files/.
+# WSI files are large and not redistributable.
+sample_files/
+
+# Build outputs
+/bin/
+*.test
+*.out
+coverage.txt
+profile.out
+cpu.prof
+mem.prof
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local-only Claude state
+.claude/
