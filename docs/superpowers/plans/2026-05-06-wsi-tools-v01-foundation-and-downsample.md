@@ -837,8 +837,15 @@ type LevelSpec struct {
 	// SamplesPerPixel defaults to 3 if zero.
 	SamplesPerPixel uint16
 
-	// SubfileType / NewSubfileType for pyramid level signalling. Aperio uses
-	// NewSubfileType=0 for L0 and NewSubfileType=1 (reduced-resolution) for L1+.
+	// SubfileType / NewSubfileType for pyramid level signalling.
+	//
+	// CORRECTION (discovered Task 11): opentile-go's SVS classifier
+	// (formats/svs/series.go:classifyPages) walks pyramid levels as
+	// "tiled AND NOT reduced". A pyramid level with NewSubfileType bit 0
+	// set (reduced=true) is classified as a trailing associated image,
+	// not a Baseline pyramid level. So all pyramid levels (L0 + L1+) must
+	// use NewSubfileType=0; the "reduced" bit is reserved for label/macro
+	// associated IFDs.
 	NewSubfileType uint32
 }
 
@@ -3421,7 +3428,7 @@ func buildPyramid(ctx context.Context, src opentile.Tiler, w *wsiwriter.Writer, 
 	//         ImageWidth: srcW/factor^outLvl, ImageHeight: srcH/factor^outLvl,
 	//         TileWidth: 256, TileHeight: 256,
 	//         Compression: CompressionJPEG, JPEGTables: enc.LevelHeader(),
-	//         JPEGAbbreviatedTiles: true, NewSubfileType: 0 if outLvl==0 else 1,
+	//         JPEGAbbreviatedTiles: true, NewSubfileType: 0, // ALL levels — see Task 11 lesson.
 	//     })
 	//
 	//     pipeline.Run(ctx, pipeline.Config{
