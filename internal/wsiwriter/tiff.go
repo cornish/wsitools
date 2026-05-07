@@ -130,6 +130,80 @@ type TIFFTag struct {
 	Value []byte
 }
 
+// AssociatedSpec describes an associated image (label, macro, thumbnail, overview)
+// to be stored as a stripped IFD. The caller provides already-encoded bytes.
+type AssociatedSpec struct {
+	Kind                      string // "label", "macro", "thumbnail", "overview" (informational only)
+	Compressed                []byte // already-encoded bytes (or raw if Compression == CompressionNone)
+	Width, Height             uint32
+	Compression               uint16
+	PhotometricInterpretation uint16
+	NewSubfileType            uint32 // 1 for reduced-res, 9 for label, etc.
+	ExtraTags                 []TIFFTag
+}
+
+// AddAssociated appends a stripped associated-image IFD to the TIFF file.
+// The pixel/compressed bytes in s.Compressed are written immediately; the IFD
+// is deferred until Close (consistent with AddLevel). Both CompressionNone and
+// pre-encoded data (any other compression) are handled identically: bytes are
+// written verbatim.
+func (w *Writer) AddAssociated(s AssociatedSpec) error {
+	if w.closed {
+		return fmt.Errorf("wsiwriter: writer is closed")
+	}
+
+	// Write the strip data at the current file position.
+	stripOffset, err := w.currentOffset()
+	if err != nil {
+		return fmt.Errorf("wsiwriter: get strip offset: %w", err)
+	}
+	if _, err := w.f.Write(s.Compressed); err != nil {
+		return fmt.Errorf("wsiwriter: write associated strip data: %w", err)
+	}
+	stripCount := uint32(len(s.Compressed))
+
+	entry := &imageEntry{
+		stripOffsets: []uint32{uint32(stripOffset)},
+		stripCounts:  []uint32{stripCount},
+	}
+
+	// BitsPerSample for RGB: [8,8,8].
+	bps := []uint16{8, 8, 8}
+	tags := []ifdTag{
+		w.makeLongTag(256, s.Width),                       // ImageWidth
+		w.makeLongTag(257, s.Height),                      // ImageLength
+		w.makeShortsTag(258, bps),                         // BitsPerSample [8,8,8]
+		w.makeShortTag(259, s.Compression),                // Compression
+		w.makeShortTag(262, s.PhotometricInterpretation),  // PhotometricInterpretation
+		w.makeLongTag(273, uint32(stripOffset)),            // StripOffsets
+		w.makeShortTag(277, 3),                             // SamplesPerPixel
+		w.makeLongTag(278, s.Height),                       // RowsPerStrip = Height (single strip)
+		w.makeLongTag(279, stripCount),                     // StripByteCounts
+		w.makeShortTag(284, 1),                             // PlanarConfiguration = chunky
+	}
+
+	// NewSubfileType (tag 254): emit when non-zero.
+	if s.NewSubfileType != 0 {
+		tags = append(tags, w.makeLongTag(254, s.NewSubfileType))
+	}
+
+	// Caller-supplied extra tags (emitted verbatim).
+	for _, et := range s.ExtraTags {
+		b := make([]byte, len(et.Value))
+		copy(b, et.Value)
+		tags = append(tags, ifdTag{
+			tag:   et.Tag,
+			typ:   et.Type,
+			count: et.Count,
+			value: b,
+		})
+	}
+
+	entry.tags = tags
+	w.imgs = append(w.imgs, entry)
+	return nil
+}
+
 // LevelHandle accepts tile bytes for one level.
 type LevelHandle struct {
 	w      *Writer

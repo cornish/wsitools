@@ -202,3 +202,44 @@ func TestWriteMinimalTIFF(t *testing.T) {
 		t.Errorf("bounds: got %v, want %v", got, want)
 	}
 }
+
+func TestAddAssociated(t *testing.T) {
+	if _, err := exec.LookPath("tiffinfo"); err != nil {
+		t.Skip("tiffinfo not in PATH")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "with-assoc.tiff")
+	w, _ := Create(path, WithBigTIFF(true))
+	// Main pyramid level (one tile so we have a real L0).
+	level, _ := w.AddLevel(LevelSpec{
+		ImageWidth: 8, ImageHeight: 8, TileWidth: 8, TileHeight: 8,
+		Compression: CompressionNone, PhotometricInterpretation: 2,
+	})
+	level.WriteTile(0, 0, make([]byte, 8*8*3))
+
+	// Synthetic "label" image: 4x4 RGB strip, all 0x55 bytes.
+	labelStrip := make([]byte, 4*4*3)
+	for i := range labelStrip {
+		labelStrip[i] = 0x55
+	}
+	if err := w.AddAssociated(AssociatedSpec{
+		Kind:                      "label",
+		Compressed:                labelStrip,
+		Width:                     4,
+		Height:                    4,
+		Compression:               CompressionNone,
+		PhotometricInterpretation: 2,
+		NewSubfileType:            1, // reduced-resolution
+	}); err != nil {
+		t.Fatalf("AddAssociated: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _ := exec.Command("tiffinfo", path).CombinedOutput()
+	got := string(out)
+	if strings.Count(got, "TIFF Directory") < 2 {
+		t.Errorf("expected ≥2 IFDs, got:\n%s", got)
+	}
+}
