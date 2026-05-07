@@ -228,12 +228,19 @@ func (w *Writer) AddStrippedImage(s StrippedSpec) error {
 
 // Close finalises the TIFF: emits all IFDs with correct next-IFD chaining,
 // back-patches the first-IFD offset into the header, closes the temp file,
-// and renames it to the final path. Tmp removal on error is Task 7's job.
-func (w *Writer) Close() error {
+// and renames it to the final path. On error, the .tmp file is removed.
+// Close is idempotent: a second call returns nil.
+func (w *Writer) Close() (err error) {
 	if w.closed {
-		return fmt.Errorf("wsiwriter: already closed")
+		return nil // idempotent close
 	}
 	w.closed = true
+
+	defer func() {
+		if err != nil {
+			os.Remove(w.tmpPath)
+		}
+	}()
 
 	// Emit IFDs in order. Strategy:
 	//   1. Write any out-of-band tag values (e.g. BitsPerSample [8,8,8]).
@@ -250,21 +257,21 @@ func (w *Writer) Close() error {
 		// For tiled entries, build the IFD tag list now (after all WriteTile calls
 		// have populated tileOffsets/tileCounts).
 		if entry.spec != nil {
-			if err := w.buildTiledTags(entry); err != nil {
+			if err = w.buildTiledTags(entry, i == 0); err != nil {
 				w.f.Close()
 				return fmt.Errorf("wsiwriter: build tiled tags for IFD %d: %w", i, err)
 			}
 		}
 
 		// 1. Write out-of-band tag values (BitsPerSample etc.).
-		if err := w.writeOutOfBandValues(entry); err != nil {
+		if err = w.writeOutOfBandValues(entry); err != nil {
 			w.f.Close()
 			return fmt.Errorf("wsiwriter: out-of-band values for IFD %d: %w", i, err)
 		}
 
 		// 2. Record IFD start position.
-		start, err := w.currentOffset()
-		if err != nil {
+		var start int64
+		if start, err = w.currentOffset(); err != nil {
 			w.f.Close()
 			return fmt.Errorf("wsiwriter: seek before IFD %d: %w", i, err)
 		}
@@ -272,15 +279,15 @@ func (w *Writer) Close() error {
 
 		// 3. Back-patch previous IFD's next-IFD field.
 		if i > 0 {
-			if err := w.patchOffset(nextIFDPatchAt[i-1], uint64(start)); err != nil {
+			if err = w.patchOffset(nextIFDPatchAt[i-1], uint64(start)); err != nil {
 				w.f.Close()
 				return fmt.Errorf("wsiwriter: patch next-IFD for IFD %d: %w", i-1, err)
 			}
 		}
 
 		// 4. Emit this IFD; record where its next-IFD field is for future patching.
-		patchAt, err := w.emitIFD(entry)
-		if err != nil {
+		var patchAt int64
+		if patchAt, err = w.emitIFD(entry); err != nil {
 			w.f.Close()
 			return fmt.Errorf("wsiwriter: emit IFD %d: %w", i, err)
 		}
@@ -298,15 +305,15 @@ func (w *Writer) Close() error {
 	if w.bigtiff {
 		firstIFDPatchAt = 8
 	}
-	if err := w.patchOffset(firstIFDPatchAt, firstIFDOffset); err != nil {
+	if err = w.patchOffset(firstIFDPatchAt, firstIFDOffset); err != nil {
 		w.f.Close()
 		return fmt.Errorf("wsiwriter: patch first-IFD offset: %w", err)
 	}
 
-	if err := w.f.Close(); err != nil {
+	if err = w.f.Close(); err != nil {
 		return fmt.Errorf("wsiwriter: close tmp: %w", err)
 	}
-	if err := os.Rename(w.tmpPath, w.path); err != nil {
+	if err = os.Rename(w.tmpPath, w.path); err != nil {
 		return fmt.Errorf("wsiwriter: rename tmp to final: %w", err)
 	}
 	return nil
@@ -583,8 +590,9 @@ func (w *Writer) makeUndefinedTag(tag uint16, data []byte) ifdTag {
 
 // buildTiledTags constructs the IFD tag list for a tiled imageEntry.
 // Must be called after all WriteTile calls have populated entry.tileOffsets
-// and entry.tileCounts.
-func (w *Writer) buildTiledTags(entry *imageEntry) error {
+// and entry.tileCounts. isL0 indicates whether this is the first (L0) IFD,
+// which may receive extra tags such as ImageDescription.
+func (w *Writer) buildTiledTags(entry *imageEntry, isL0 bool) error {
 	s := entry.spec
 
 	bps := []uint16{8, 8, 8}

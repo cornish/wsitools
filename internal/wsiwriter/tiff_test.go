@@ -11,6 +11,50 @@ import (
 	xtiff "golang.org/x/image/tiff"
 )
 
+func TestAtomicClose_RemovesTmpOnError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.tiff")
+
+	w, err := Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Force an error by closing the underlying file out from under the writer.
+	w.f.Close()
+	err = w.Close()
+	if err == nil {
+		t.Fatalf("Close should have failed after underlying file was closed")
+	}
+	// .tmp file should be gone; final file should not exist.
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf(".tmp not removed: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("final path exists: %v", err)
+	}
+}
+
+func TestAtomicClose_RenamesOnSuccess(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.tiff")
+	w, _ := Create(path)
+	level, _ := w.AddLevel(LevelSpec{
+		ImageWidth: 8, ImageHeight: 8,
+		TileWidth: 8, TileHeight: 8,
+		Compression: CompressionNone, PhotometricInterpretation: 2,
+	})
+	level.WriteTile(0, 0, make([]byte, 8*8*3))
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("final path missing: %v", err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf(".tmp still present: %v", err)
+	}
+}
+
 // TestWriteTiledTIFF writes a 16x16 RGB image laid out as four 8x8 uncompressed
 // tiles, then re-decodes via golang.org/x/image/tiff to verify structural validity.
 func TestWriteTiledTIFF(t *testing.T) {
