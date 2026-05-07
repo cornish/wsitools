@@ -23,14 +23,18 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"time"
 
 	opentile "github.com/cornish/opentile-go"
 	_ "github.com/cornish/opentile-go/formats/all"
 	"github.com/spf13/cobra"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 
 	codec "github.com/cornish/wsi-tools/internal/codec"
 	jpegcodec "github.com/cornish/wsi-tools/internal/codec/jpeg"
@@ -194,6 +198,19 @@ func runDownsample(cmd *cobra.Command, args []string) error {
 		ctx = context.Background()
 	}
 
+	slog.Info("starting downsample",
+		"input", input,
+		"output", dsOutput,
+		"factor", dsFactor,
+		"quality", dsQuality,
+		"jobs", dsJobs,
+		"src_w", srcW,
+		"src_h", srcH,
+		"out_w", outW,
+		"out_h", outH,
+	)
+
+	start := time.Now()
 	if err := buildPyramid(ctx, src, w, dsFactor, dsQuality, dsJobs); err != nil {
 		return fmt.Errorf("build pyramid: %w", err)
 	}
@@ -208,8 +225,35 @@ func runDownsample(cmd *cobra.Command, args []string) error {
 	}
 	closed = true
 
-	fmt.Printf("wrote %s\n", dsOutput)
+	elapsed := time.Since(start)
+
+	// Report output file size.
+	var outSizeStr string
+	if fi, err := os.Stat(dsOutput); err == nil {
+		outSizeStr = formatBytes(fi.Size())
+	}
+
+	slog.Info("downsample complete",
+		"output", dsOutput,
+		"elapsed", elapsed.Round(time.Millisecond).String(),
+		"output_size", outSizeStr,
+	)
+	fmt.Printf("wrote %s (%s, %s)\n", dsOutput, outSizeStr, elapsed.Round(time.Millisecond))
 	return nil
+}
+
+// formatBytes formats a byte count as a human-readable string.
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for n2 := n / unit; n2 >= unit; n2 /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // isValidFactor reports whether f is one of {2, 4, 8, 16} (the supported
@@ -239,6 +283,14 @@ func predictBigTIFFNeeded(srcL0 opentile.Level, levels []opentile.Level, factor 
 	return total > bigTIFFThreshold
 }
 
+// countTilesForLevel returns the number of 256×256 tiles needed to cover a
+// raster of the given dimensions.
+func countTilesForLevel(w, h int) int {
+	tilesX := (w + outputTileSize - 1) / outputTileSize
+	tilesY := (h + outputTileSize - 1) / outputTileSize
+	return tilesX * tilesY
+}
+
 // buildPyramid materialises the output L0 raster from the source L0 (with
 // 1/factor fast-scale decode), then iteratively encodes + writes each output
 // pyramid level (256x256 tiled JPEG). L1+ rasters are computed in-memory
@@ -252,13 +304,53 @@ func buildPyramid(ctx context.Context, src opentile.Tiler, w *wsiwriter.Writer, 
 	outW := srcW / factor
 	outH := srcH / factor
 
+	// Compute total tile count across all output levels upfront for the
+	// progress bar.
+	nLevels := len(srcLevels)
+	var totalTiles int64
+	{
+		lw, lh := outW, outH
+		for lvl := 0; lvl < nLevels; lvl++ {
+			totalTiles += int64(countTilesForLevel(lw, lh))
+			if lvl < nLevels-1 {
+				lw /= 2
+				lh /= 2
+				if lw == 0 || lh == 0 {
+					break
+				}
+			}
+		}
+	}
+
+	// Set up progress bar on stderr (suppressed when --quiet).
+	var progress *mpb.Progress
+	var bar *mpb.Bar
+	if !flagQuiet {
+		progress = mpb.New(mpb.WithOutput(os.Stderr))
+		bar = progress.AddBar(totalTiles,
+			mpb.PrependDecorators(
+				decor.Name("encoding "),
+				decor.Percentage(decor.WCSyncSpace),
+			),
+			mpb.AppendDecorators(
+				decor.EwmaSpeed(0, "%.0f tiles/s", 30),
+				decor.Name(" ETA "),
+				decor.EwmaETA(decor.ET_STYLE_GO, 30),
+			),
+		)
+	}
+
 	// 1. Materialise output L0 raster from source L0.
 	rasterBytes := int64(outW) * int64(outH) * 3
 	if rasterBytes < 0 {
 		return fmt.Errorf("output L0 raster size overflows int64")
 	}
+	slog.Debug("materialising output L0 raster", "out_w", outW, "out_h", outH, "raster_mb", rasterBytes/(1024*1024))
 	outL0 := make([]byte, rasterBytes)
 	if err := materializeOutputL0(ctx, srcL0, outL0, outW, outH, factor); err != nil {
+		if progress != nil {
+			progress.Wait()
+		}
 		return err
 	}
 
@@ -268,11 +360,27 @@ func buildPyramid(ctx context.Context, src opentile.Tiler, w *wsiwriter.Writer, 
 	// 2x2 area-average.
 	currentRaster := outL0
 	currentW, currentH := outW, outH
-	nLevels := len(srcLevels)
 
 	for outLvl := 0; outLvl < nLevels; outLvl++ {
-		if err := encodeAndWriteLevel(ctx, w, currentRaster, currentW, currentH, quality, workers); err != nil {
+		lvlStart := time.Now()
+		tiles := countTilesForLevel(currentW, currentH)
+		slog.Debug("encoding level", "level", outLvl, "w", currentW, "h", currentH, "tiles", tiles)
+
+		if err := encodeAndWriteLevel(ctx, w, currentRaster, currentW, currentH, quality, workers, bar); err != nil {
+			if progress != nil {
+				progress.Wait()
+			}
 			return fmt.Errorf("level %d: %w", outLvl, err)
+		}
+
+		if flagVerbose {
+			slog.Info("encoded level",
+				"level", outLvl,
+				"w", currentW,
+				"h", currentH,
+				"tiles", tiles,
+				"elapsed", time.Since(lvlStart).Round(time.Millisecond).String(),
+			)
 		}
 
 		if outLvl < nLevels-1 {
@@ -289,6 +397,9 @@ func buildPyramid(ctx context.Context, src opentile.Tiler, w *wsiwriter.Writer, 
 			}
 			next, err := resample.Area2x2(currentRaster, currentW, currentH)
 			if err != nil {
+				if progress != nil {
+					progress.Wait()
+				}
 				return fmt.Errorf("Area2x2 level %d→%d: %w", outLvl, outLvl+1, err)
 			}
 			currentRaster = next
@@ -297,9 +408,13 @@ func buildPyramid(ctx context.Context, src opentile.Tiler, w *wsiwriter.Writer, 
 			if currentW == 0 || currentH == 0 {
 				// No more useful resolution; stop early. (Possible for very
 				// shallow source pyramids combined with large factor.)
-				return nil
+				break
 			}
 		}
+	}
+
+	if progress != nil {
+		progress.Wait()
 	}
 	return nil
 }
@@ -459,8 +574,8 @@ func downsampleByPowerOf2(rgb []byte, srcW, srcH, factor int) ([]byte, int, int,
 // encodeAndWriteLevel encodes the in-memory RGB raster into 256x256 abbreviated
 // JPEG tiles and writes them via a wsiwriter LevelHandle. All pyramid IFDs use
 // NewSubfileType=0 — opentile-go's SVS classifier rejects pyramid levels with
-// the reduced bit set.
-func encodeAndWriteLevel(ctx context.Context, w *wsiwriter.Writer, raster []byte, levelW, levelH, quality, workers int) error {
+// the reduced bit set. bar may be nil when --quiet is set.
+func encodeAndWriteLevel(ctx context.Context, w *wsiwriter.Writer, raster []byte, levelW, levelH, quality, workers int, bar *mpb.Bar) error {
 	enc, err := jpegcodec.Factory{}.NewEncoder(codec.LevelGeometry{
 		TileWidth:   outputTileSize,
 		TileHeight:  outputTileSize,
@@ -513,7 +628,13 @@ func encodeAndWriteLevel(ctx context.Context, w *wsiwriter.Writer, raster []byte
 		return t, nil
 	}
 	sink := func(t pipeline.Tile) error {
-		return lh.WriteTile(t.X, t.Y, t.Bytes)
+		if err := lh.WriteTile(t.X, t.Y, t.Bytes); err != nil {
+			return err
+		}
+		if bar != nil {
+			bar.Increment()
+		}
+		return nil
 	}
 
 	return pipeline.Run(ctx, pipeline.Config{
