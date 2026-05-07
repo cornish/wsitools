@@ -2,14 +2,19 @@ package jpeg
 
 import (
 	"bytes"
-	"image"
-	"image/color"
-	stdjpeg "image/jpeg"
 	"testing"
 
 	"github.com/cornish/wsi-tools/internal/codec"
+	"github.com/cornish/wsi-tools/internal/decoder"
 )
 
+// TestJPEGEncoderRoundTrip verifies encode→decode fidelity using libjpeg-turbo
+// on the decode side. The Go stdlib image/jpeg decoder is NOT used here because
+// it does not honor the Adobe APP14 marker that this encoder writes — stdlib
+// always applies the YCbCr→RGB inverse transform regardless of marker, which
+// hue-rotates output that's stored as raw RGB. libjpeg-turbo's tjDecompress2
+// (and openslide / QuPath / libvips) honors APP14 and reproduces the source
+// pixels.
 func TestJPEGEncoderRoundTrip(t *testing.T) {
 	// 256x256 RGB tile with a gradient.
 	rgb := make([]byte, 256*256*3)
@@ -45,24 +50,33 @@ func TestJPEGEncoderRoundTrip(t *testing.T) {
 	if len(tables) == 0 {
 		t.Fatal("LevelHeader: empty")
 	}
-	// Splice tables (drop EOI) + tile (drop SOI) for stdlib decode.
+	// Splice tables + tile into a self-contained JPEG, then decode with
+	// libjpeg-turbo's tjDecompress2 (which honors APP14).
 	spliced := spliceForDecode(tables, tile)
-	im, err := stdjpeg.Decode(bytes.NewReader(spliced))
+	if spliced == nil {
+		t.Fatal("splice produced nil")
+	}
+	dec := decoder.NewJPEG()
+	out, err := dec.DecodeTile(spliced, nil, 1, 1)
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("DecodeTile: %v", err)
 	}
-	if im.Bounds() != image.Rect(0, 0, 256, 256) {
-		t.Errorf("bounds: %v", im.Bounds())
+	if got, want := len(out), 256*256*3; got != want {
+		t.Errorf("decoded length: got %d, want %d", got, want)
 	}
-	c := im.At(10, 20)
-	r, g, b, _ := c.RGBA()
-	got := color.RGBA{R: byte(r >> 8), G: byte(g >> 8), B: byte(b >> 8)}
-	// JPEG drift tolerance ±10 per channel at q=85.
-	if abs(int(got.R)-10) > 10 || abs(int(got.G)-20) > 10 || abs(int(got.B)-128) > 10 {
-		t.Errorf("pixel (10,20) round-trip drift too large: got %v", got)
+	// Spot-check pixel (10, 20) — RGB888-packed at offset (20*256 + 10)*3.
+	off := (20*256 + 10) * 3
+	gotR, gotG, gotB := int(out[off]), int(out[off+1]), int(out[off+2])
+	// JPEG drift tolerance at q=85: lossy compression on a smooth gradient
+	// should be tight (≤8 per channel).
+	if abs(gotR-10) > 8 || abs(gotG-20) > 8 || abs(gotB-128) > 8 {
+		t.Errorf("pixel (10,20) round-trip drift too large: got R=%d G=%d B=%d, want ~(10, 20, 128)", gotR, gotG, gotB)
 	}
 }
 
+// spliceForDecode joins a tables-only JPEG (SOI + DQT + DHT + EOI) with an
+// abbreviated tile (SOI + APP14 + SOF + SOS + entropy + EOI) into a
+// self-contained JPEG by dropping the tables' EOI and the tile's SOI.
 func spliceForDecode(tables, tile []byte) []byte {
 	if !bytes.HasSuffix(tables, []byte{0xFF, 0xD9}) || !bytes.HasPrefix(tile, []byte{0xFF, 0xD8}) {
 		return nil

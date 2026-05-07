@@ -51,12 +51,20 @@ static int wsi_encode(
     cinfo.input_components = 3;
     cinfo.in_color_space = JCS_RGB;
     jpeg_set_defaults(&cinfo);
-    // Leave jpeg_color_space as JCS_YCbCr (the default for RGB input).
-    // libjpeg converts RGB→YCbCr before encoding. This is standard JPEG
-    // and allows correct round-trip decode with any compliant JPEG decoder.
-    // The Adobe APP14 marker (abbreviated mode) signals Aperio/Photoshop
-    // compatibility metadata; it is ignored by the Go stdlib decoder which
-    // correctly decodes the YCbCr stream via the standard inverse transform.
+    // Override the default JCS_YCbCr storage with JCS_RGB so pixels are
+    // encoded raw RGB without the YCbCr conversion. This matches what the
+    // Adobe APP14 marker (ColorTransform=0) declares to decoders, and is
+    // what real Aperio SVS files do. libjpeg's jpeg_set_colorspace updates
+    // component sampling factors, quant table targets, and Huffman tables
+    // for the new colorspace — must be called AFTER jpeg_set_defaults and
+    // BEFORE jpeg_set_quality.
+    //
+    // Decoders that honor APP14 (libjpeg-turbo, openslide, QuPath, libvips)
+    // skip the inverse YCbCr transform and produce the original RGB. The Go
+    // stdlib JPEG decoder does NOT honor APP14 and will produce hue-rotated
+    // output — which is why this codec's round-trip tests decode via
+    // libjpeg-turbo (tjDecompress2) rather than image/jpeg.
+    jpeg_set_colorspace(&cinfo, JCS_RGB);
     jpeg_set_quality(&cinfo, quality, TRUE);
 
     if (abbreviated) {
