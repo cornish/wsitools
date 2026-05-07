@@ -1,0 +1,734 @@
+// Package main: the downsample subcommand wires opentile-go (read), our
+// JPEG/JP2K decoders, the resample primitives, the JPEG codec, and wsiwriter
+// (write) into a single command that produces a power-of-2-downsampled SVS.
+//
+// v0.1 architecture (intentionally simple, tightening in v0.2):
+//
+//   - The output L0 is fully materialised in memory as a packed RGB888 buffer.
+//     Source L0 tiles are decoded at libjpeg-turbo's fast-scale 1/factor (or
+//     full-decoded + Area2x2 for JP2K sources) and pasted into the buffer.
+//   - Output L1+ is computed by repeated 2x2 area-average over the previous
+//     level's in-memory raster.
+//   - For each output level, the raster is re-tiled into 256x256 chunks and
+//     encoded via the JPEG codec, written to the output via wsiwriter.
+//   - Associated images (label, macro, thumbnail/overview) are passed through
+//     verbatim via opentile-go's AssociatedImage.Bytes().
+//
+// Memory: a 40x slide L0 (50K x 30K) needs ~4.5 GB; a 100K x 60K source needs
+// ~18 GB. v0.1 accepts this; v0.2 streams the L0 raster in row strips.
+package main
+
+import (
+	"context"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+
+	opentile "github.com/cornish/opentile-go"
+	_ "github.com/cornish/opentile-go/formats/all"
+	"github.com/spf13/cobra"
+
+	codec "github.com/cornish/wsi-tools/internal/codec"
+	jpegcodec "github.com/cornish/wsi-tools/internal/codec/jpeg"
+	"github.com/cornish/wsi-tools/internal/decoder"
+	"github.com/cornish/wsi-tools/internal/pipeline"
+	"github.com/cornish/wsi-tools/internal/resample"
+	"github.com/cornish/wsi-tools/internal/wsiwriter"
+)
+
+const (
+	// outputTileSize is the standard Aperio SVS tile size and what
+	// opentile-go's SVS reader expects on re-open.
+	outputTileSize = 256
+	// bigTIFFThreshold is the predicted output size at which we auto-promote
+	// to BigTIFF (8-byte offsets). Classic TIFF tops out at 4 GiB but we
+	// promote earlier with safety margin against late-IFD growth.
+	bigTIFFThreshold = int64(2) * 1024 * 1024 * 1024
+)
+
+var (
+	dsOutput    string
+	dsFactor    int
+	dsTargetMag int
+	dsQuality   int
+	dsJobs      int
+	dsForce     bool
+)
+
+var downsampleCmd = &cobra.Command{
+	Use:   "downsample [flags] <input>",
+	Short: "Downsample a WSI by a power-of-2 factor",
+	Long: `Downsample a WSI by an integer power-of-2 factor (default 2 = 40x → 20x).
+Regenerates the entire pyramid from the new L0; passes through associated
+images (label, macro, thumbnail, overview) verbatim.
+
+v0.1 supports SVS sources only.
+
+Examples:
+
+  # 40x → 20x SVS (defaults)
+  wsi-tools downsample -o slide-20x.svs slide-40x.svs
+
+  # 40x → 10x at higher quality, 8 workers
+  wsi-tools downsample --factor 4 --quality 95 --jobs 8 -o out.svs in.svs`,
+	Args:          cobra.ExactArgs(1),
+	RunE:          runDownsample,
+	SilenceUsage:  true,
+	SilenceErrors: false,
+}
+
+func init() {
+	downsampleCmd.Flags().StringVarP(&dsOutput, "output", "o", "", "output file path (required)")
+	downsampleCmd.Flags().IntVar(&dsFactor, "factor", 2, "downsample factor (must be a power of 2 in {2,4,8,16})")
+	downsampleCmd.Flags().IntVar(&dsTargetMag, "target-mag", 0, "alternative to --factor: derive factor from source AppMag")
+	downsampleCmd.Flags().IntVar(&dsQuality, "quality", 90, "JPEG quality 1..100")
+	downsampleCmd.Flags().IntVar(&dsJobs, "jobs", runtime.NumCPU(), "worker goroutines")
+	downsampleCmd.Flags().BoolVarP(&dsForce, "force", "f", false, "overwrite output if it exists")
+	_ = downsampleCmd.MarkFlagRequired("output")
+	rootCmd.AddCommand(downsampleCmd)
+}
+
+func runDownsample(cmd *cobra.Command, args []string) error {
+	input := args[0]
+
+	// Validation.
+	if dsQuality < 1 || dsQuality > 100 {
+		return fmt.Errorf("--quality must be in [1, 100], got %d", dsQuality)
+	}
+	if dsJobs < 1 {
+		dsJobs = 1
+	}
+	if _, err := os.Stat(input); err != nil {
+		return fmt.Errorf("input: %w", err)
+	}
+	if !dsForce {
+		if _, err := os.Stat(dsOutput); err == nil {
+			return fmt.Errorf("output exists (use --force to overwrite): %s", dsOutput)
+		}
+	}
+	absIn, _ := filepath.Abs(input)
+	absOut, _ := filepath.Abs(dsOutput)
+	if absIn == absOut {
+		return fmt.Errorf("input and output paths are the same")
+	}
+
+	// Open source.
+	src, err := opentile.OpenFile(input)
+	if err != nil {
+		return fmt.Errorf("open source: %w", err)
+	}
+	defer src.Close()
+	if string(src.Format()) != "svs" {
+		return fmt.Errorf("v0.1 supports SVS sources only; got %s", src.Format())
+	}
+
+	// Parse source ImageDescription (read raw from TIFF tag 270 of IFD 0;
+	// opentile-go's Tiler does not expose the raw description verbatim).
+	rawDesc, err := readSourceImageDescription(input)
+	if err != nil {
+		return fmt.Errorf("read source ImageDescription: %w", err)
+	}
+	desc, err := wsiwriter.ParseImageDescription(rawDesc)
+	if err != nil {
+		return fmt.Errorf("parse source ImageDescription: %w", err)
+	}
+
+	// Resolve --target-mag if specified (overrides --factor).
+	if dsTargetMag > 0 {
+		if desc.AppMag <= 0 {
+			return fmt.Errorf("--target-mag set but source AppMag is unknown/zero")
+		}
+		ratio := desc.AppMag / float64(dsTargetMag)
+		// Snap to nearest valid power-of-2 factor and verify it matches.
+		f := int(ratio + 0.0001)
+		if !isValidFactor(f) || float64(f) != ratio {
+			return fmt.Errorf("source AppMag %g / target %d = %g is not a valid power-of-2 in {2,4,8,16}", desc.AppMag, dsTargetMag, ratio)
+		}
+		dsFactor = f
+	}
+	if !isValidFactor(dsFactor) {
+		return fmt.Errorf("--factor must be one of {2,4,8,16}, got %d", dsFactor)
+	}
+
+	// Compute output L0 dimensions.
+	srcL0 := src.Levels()[0]
+	srcW := srcL0.Size().W
+	srcH := srcL0.Size().H
+	outW := srcW / dsFactor
+	outH := srcH / dsFactor
+	if outW <= 0 || outH <= 0 {
+		return fmt.Errorf("output L0 dimensions degenerate: %dx%d (factor %d too large)", outW, outH, dsFactor)
+	}
+
+	// Mutate the ImageDescription for the new magnification + geometry.
+	desc.MutateForDownsample(dsFactor, uint32(outW), uint32(outH))
+
+	// Predict output size to decide BigTIFF promotion.
+	bigtiff := predictBigTIFFNeeded(srcL0, src.Levels(), dsFactor)
+
+	// Open writer (atomic .tmp + rename via wsiwriter.Close).
+	w, err := wsiwriter.Create(dsOutput,
+		wsiwriter.WithBigTIFF(bigtiff),
+		wsiwriter.WithImageDescription(desc.Encode()),
+	)
+	if err != nil {
+		return fmt.Errorf("create writer: %w", err)
+	}
+
+	// Build pyramid (closes writer's tmp file on error via defer below).
+	closed := false
+	defer func() {
+		if !closed {
+			// Close() with error path inside; ignore explicit error to surface
+			// the original cause.
+			_ = w.Close()
+		}
+	}()
+
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if err := buildPyramid(ctx, src, w, dsFactor, dsQuality, dsJobs); err != nil {
+		return fmt.Errorf("build pyramid: %w", err)
+	}
+
+	// Pass through associated images verbatim.
+	if err := writeAssociatedPassthrough(src, w); err != nil {
+		return fmt.Errorf("write associated: %w", err)
+	}
+
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("close writer: %w", err)
+	}
+	closed = true
+
+	fmt.Printf("wrote %s\n", dsOutput)
+	return nil
+}
+
+// isValidFactor reports whether f is one of {2, 4, 8, 16} (the supported
+// libjpeg-turbo fast-scale powers of two for the JPEG path; JP2K path falls
+// back to chained Area2x2).
+func isValidFactor(f int) bool {
+	switch f {
+	case 2, 4, 8, 16:
+		return true
+	}
+	return false
+}
+
+// predictBigTIFFNeeded estimates whether the output's tile-data + IFD region
+// will exceed the classic-TIFF 4 GiB / 32-bit offset ceiling. Heuristic: sum
+// of (W*H/factor^2) bytes for an RGB raster across all output levels at JPEG
+// compressed roughly 1/8 average → divide by 8. If that exceeds 2 GiB,
+// promote to BigTIFF.
+func predictBigTIFFNeeded(srcL0 opentile.Level, levels []opentile.Level, factor int) bool {
+	var total int64
+	for _, l := range levels {
+		w := int64(l.Size().W / factor)
+		h := int64(l.Size().H / factor)
+		// JPEG 1/8 compression ratio rough estimate for RGB888.
+		total += w * h * 3 / 8
+	}
+	return total > bigTIFFThreshold
+}
+
+// buildPyramid materialises the output L0 raster from the source L0 (with
+// 1/factor fast-scale decode), then iteratively encodes + writes each output
+// pyramid level (256x256 tiled JPEG). L1+ rasters are computed in-memory
+// from the previous level via 2x2 area-average.
+func buildPyramid(ctx context.Context, src opentile.Tiler, w *wsiwriter.Writer, factor, quality, workers int) error {
+	srcLevels := src.Levels()
+	srcL0 := srcLevels[0]
+
+	srcW := srcL0.Size().W
+	srcH := srcL0.Size().H
+	outW := srcW / factor
+	outH := srcH / factor
+
+	// 1. Materialise output L0 raster from source L0.
+	rasterBytes := int64(outW) * int64(outH) * 3
+	if rasterBytes < 0 {
+		return fmt.Errorf("output L0 raster size overflows int64")
+	}
+	outL0 := make([]byte, rasterBytes)
+	if err := materializeOutputL0(ctx, srcL0, outL0, outW, outH, factor); err != nil {
+		return err
+	}
+
+	// 2. Determine output level count: keep one level per source level. For
+	// each level, encode the in-memory raster into 256x256 JPEG tiles and
+	// write via the wsiwriter level handle. Build the next-level raster via
+	// 2x2 area-average.
+	currentRaster := outL0
+	currentW, currentH := outW, outH
+	nLevels := len(srcLevels)
+
+	for outLvl := 0; outLvl < nLevels; outLvl++ {
+		if err := encodeAndWriteLevel(ctx, w, currentRaster, currentW, currentH, quality, workers); err != nil {
+			return fmt.Errorf("level %d: %w", outLvl, err)
+		}
+
+		if outLvl < nLevels-1 {
+			// Area2x2 requires even dimensions; pad by 1 if odd so the last
+			// row/column is duplicated (cheap mirror padding via simple +1
+			// allocation grows). For v0.1 we just truncate to even bounds and
+			// drop the last odd row/column — acceptable error of <1 pixel at
+			// the slide edge per level.
+			evenW := currentW &^ 1
+			evenH := currentH &^ 1
+			if evenW != currentW || evenH != currentH {
+				currentRaster = cropRaster(currentRaster, currentW, currentH, evenW, evenH)
+				currentW, currentH = evenW, evenH
+			}
+			next, err := resample.Area2x2(currentRaster, currentW, currentH)
+			if err != nil {
+				return fmt.Errorf("Area2x2 level %d→%d: %w", outLvl, outLvl+1, err)
+			}
+			currentRaster = next
+			currentW /= 2
+			currentH /= 2
+			if currentW == 0 || currentH == 0 {
+				// No more useful resolution; stop early. (Possible for very
+				// shallow source pyramids combined with large factor.)
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
+// cropRaster returns a fresh RGB888 buffer of size dstW*dstH*3 containing the
+// top-left dstW×dstH region of src (which has stride srcW*3). Used to even up
+// dimensions before Area2x2.
+func cropRaster(src []byte, srcW, srcH, dstW, dstH int) []byte {
+	dst := make([]byte, dstW*dstH*3)
+	rowBytes := dstW * 3
+	for y := 0; y < dstH; y++ {
+		copy(dst[y*rowBytes:(y+1)*rowBytes], src[y*srcW*3:y*srcW*3+rowBytes])
+	}
+	return dst
+}
+
+// materializeOutputL0 decodes every source-L0 tile at libjpeg-turbo fast-scale
+// 1/factor (JPEG path) or full-decode + chained 2x2 area-average (JP2K path)
+// and pastes the result into outL0 at the correct image-space position.
+func materializeOutputL0(ctx context.Context, srcL0 opentile.Level, outL0 []byte, outW, outH, factor int) error {
+	srcCompression := srcL0.Compression()
+	srcGrid := srcL0.Grid()
+	srcTileW := srcL0.TileSize().W
+	srcTileH := srcL0.TileSize().H
+	srcW := srcL0.Size().W
+	srcH := srcL0.Size().H
+
+	// libjpeg-turbo's scale formula: outDim = ceil(inDim * 1 / factor).
+	// For interior tiles this is srcTileW/factor, srcTileH/factor exactly
+	// (we choose factors that divide common tile sizes 240/256 cleanly:
+	// 240/2=120, 240/4=60, 240/8=30, 240/16=15; same shape for 256).
+	jpegDec := decoder.NewJPEG()
+	jp2kDec := decoder.NewJPEG2000()
+
+	for ty := 0; ty < srcGrid.H; ty++ {
+		for tx := 0; tx < srcGrid.W; tx++ {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			compressed, err := srcL0.Tile(tx, ty)
+			if err != nil {
+				return fmt.Errorf("read source tile (%d,%d): %w", tx, ty, err)
+			}
+			// Compute the image-space destination rect for this source tile.
+			// The source tile covers [sx0, sx1) × [sy0, sy1) in source-pixel
+			// space, clamped at the image bounds. The corresponding output
+			// region is [sx0/factor, sx1/factor) × [sy0/factor, sy1/factor).
+			sx0 := tx * srcTileW
+			sy0 := ty * srcTileH
+			sx1 := sx0 + srcTileW
+			sy1 := sy0 + srcTileH
+			if sx1 > srcW {
+				sx1 = srcW
+			}
+			if sy1 > srcH {
+				sy1 = srcH
+			}
+			validSrcW := sx1 - sx0
+			validSrcH := sy1 - sy0
+
+			var decoded []byte
+			var decW, decH int
+			switch srcCompression {
+			case opentile.CompressionJPEG:
+				// Fast-scale decode: tjDecompress produces ceil(srcTileW/factor)
+				// × ceil(srcTileH/factor) RGB. The "valid" sub-region inside
+				// the decoded tile is ceil(validSrcW/factor) × ceil(validSrcH/factor)
+				// — at slide edges, padding pixels follow.
+				decoded, err = jpegDec.DecodeTile(compressed, nil, 1, factor)
+				if err != nil {
+					return fmt.Errorf("decode JPEG tile (%d,%d): %w", tx, ty, err)
+				}
+				decW = (srcTileW + factor - 1) / factor
+				decH = (srcTileH + factor - 1) / factor
+			case opentile.CompressionJP2K:
+				// Full-decode then chained 2x2 area-average factor/2 times.
+				full, err := jp2kDec.DecodeTile(compressed, nil, 1, 1)
+				if err != nil {
+					return fmt.Errorf("decode JP2K tile (%d,%d): %w", tx, ty, err)
+				}
+				decoded, decW, decH, err = downsampleByPowerOf2(full, srcTileW, srcTileH, factor)
+				if err != nil {
+					return fmt.Errorf("downsample JP2K tile (%d,%d): %w", tx, ty, err)
+				}
+			default:
+				return fmt.Errorf("unsupported source compression: %s", srcCompression)
+			}
+
+			// The valid region inside the decoded tile (in decoded-pixel
+			// units): only the pixels corresponding to actual image content,
+			// not padding past the slide edge.
+			validDecW := (validSrcW + factor - 1) / factor
+			validDecH := (validSrcH + factor - 1) / factor
+			if validDecW > decW {
+				validDecW = decW
+			}
+			if validDecH > decH {
+				validDecH = decH
+			}
+
+			// Destination position in the output L0 raster.
+			dx := sx0 / factor
+			dy := sy0 / factor
+			// Clamp to output bounds (defensive: rounding could nudge past
+			// outW/outH at the slide edge).
+			if dx+validDecW > outW {
+				validDecW = outW - dx
+			}
+			if dy+validDecH > outH {
+				validDecH = outH - dy
+			}
+			pasteIntoRaster(outL0, outW, outH, dx, dy, decoded, decW, validDecW, validDecH)
+		}
+	}
+	return nil
+}
+
+// pasteIntoRaster copies the top-left validW×validH region of the decoded RGB
+// tile (which has stride decW*3) into the dst raster at position (dx, dy).
+// Caller must have clamped validW/validH to fit inside dst.
+func pasteIntoRaster(dst []byte, dstW, dstH, dx, dy int, src []byte, srcStrideW, validW, validH int) {
+	if validW <= 0 || validH <= 0 {
+		return
+	}
+	rowBytes := validW * 3
+	srcStride := srcStrideW * 3
+	dstStride := dstW * 3
+	for y := 0; y < validH; y++ {
+		srcOff := y * srcStride
+		dstOff := (dy+y)*dstStride + dx*3
+		copy(dst[dstOff:dstOff+rowBytes], src[srcOff:srcOff+rowBytes])
+	}
+}
+
+// downsampleByPowerOf2 chains Area2x2 calls log2(factor) times to produce a
+// downsampled RGB buffer. Returns the downsampled bytes and its dimensions.
+// Requires factor to be a power of two and srcW/srcH to be even at every
+// step (the v0.1 caller ensures this by choosing factor ∈ {2,4,8,16} and
+// using source tile sizes that are multiples of 16).
+func downsampleByPowerOf2(rgb []byte, srcW, srcH, factor int) ([]byte, int, int, error) {
+	cur := rgb
+	curW, curH := srcW, srcH
+	for f := factor; f > 1; f /= 2 {
+		next, err := resample.Area2x2(cur, curW, curH)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		cur = next
+		curW /= 2
+		curH /= 2
+	}
+	return cur, curW, curH, nil
+}
+
+// encodeAndWriteLevel encodes the in-memory RGB raster into 256x256 abbreviated
+// JPEG tiles and writes them via a wsiwriter LevelHandle. All pyramid IFDs use
+// NewSubfileType=0 — opentile-go's SVS classifier rejects pyramid levels with
+// the reduced bit set.
+func encodeAndWriteLevel(ctx context.Context, w *wsiwriter.Writer, raster []byte, levelW, levelH, quality, workers int) error {
+	enc, err := jpegcodec.Factory{}.NewEncoder(codec.LevelGeometry{
+		TileWidth:   outputTileSize,
+		TileHeight:  outputTileSize,
+		PixelFormat: codec.PixelFormatRGB8,
+	}, codec.Quality{Knobs: map[string]string{"q": strconv.Itoa(quality)}})
+	if err != nil {
+		return fmt.Errorf("new encoder: %w", err)
+	}
+	defer enc.Close()
+
+	tables := enc.LevelHeader()
+	lh, err := w.AddLevel(wsiwriter.LevelSpec{
+		ImageWidth:                uint32(levelW),
+		ImageHeight:               uint32(levelH),
+		TileWidth:                 outputTileSize,
+		TileHeight:                outputTileSize,
+		Compression:               wsiwriter.CompressionJPEG,
+		PhotometricInterpretation: 2, // RGB (Aperio)
+		JPEGTables:                tables,
+		JPEGAbbreviatedTiles:      true,
+		NewSubfileType:            0,
+	})
+	if err != nil {
+		return fmt.Errorf("AddLevel: %w", err)
+	}
+
+	tilesX := (levelW + outputTileSize - 1) / outputTileSize
+	tilesY := (levelH + outputTileSize - 1) / outputTileSize
+
+	source := func(ctx context.Context, emit func(pipeline.Tile) error) error {
+		for ty := 0; ty < tilesY; ty++ {
+			for tx := 0; tx < tilesX; tx++ {
+				tile, err := extractTileFromRaster(raster, levelW, levelH, tx, ty)
+				if err != nil {
+					return err
+				}
+				if err := emit(pipeline.Tile{X: uint32(tx), Y: uint32(ty), Bytes: tile}); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	process := func(t pipeline.Tile) (pipeline.Tile, error) {
+		out, err := enc.EncodeTile(t.Bytes, outputTileSize, outputTileSize, nil)
+		if err != nil {
+			return pipeline.Tile{}, err
+		}
+		t.Bytes = out
+		return t, nil
+	}
+	sink := func(t pipeline.Tile) error {
+		return lh.WriteTile(t.X, t.Y, t.Bytes)
+	}
+
+	return pipeline.Run(ctx, pipeline.Config{
+		Workers: workers,
+		Source:  source,
+		Process: process,
+		Sink:    sink,
+	})
+}
+
+// extractTileFromRaster cuts a 256x256 RGB tile out of the level raster at
+// tile coord (tx, ty). Edge tiles are padded with zero where the raster
+// doesn't extend that far. Always returns a fresh outputTileSize×outputTileSize
+// buffer for the encoder.
+func extractTileFromRaster(raster []byte, rasterW, rasterH, tx, ty int) ([]byte, error) {
+	tile := make([]byte, outputTileSize*outputTileSize*3)
+	x0 := tx * outputTileSize
+	y0 := ty * outputTileSize
+	if x0 >= rasterW || y0 >= rasterH {
+		return tile, nil // empty edge — full zero pad
+	}
+	copyW := outputTileSize
+	if x0+copyW > rasterW {
+		copyW = rasterW - x0
+	}
+	copyH := outputTileSize
+	if y0+copyH > rasterH {
+		copyH = rasterH - y0
+	}
+	srcStride := rasterW * 3
+	dstStride := outputTileSize * 3
+	for y := 0; y < copyH; y++ {
+		srcOff := (y0+y)*srcStride + x0*3
+		dstOff := y * dstStride
+		copy(tile[dstOff:dstOff+copyW*3], raster[srcOff:srcOff+copyW*3])
+	}
+	return tile, nil
+}
+
+// writeAssociatedPassthrough writes each source associated image verbatim into
+// the output as a single-strip IFD. NewSubfileType is set per the SVS reader
+// classifier convention: thumbnail=0, label=1 (reduced bit), overview/macro=9
+// (reduced + macro bit). Compression tag mirrors the source.
+func writeAssociatedPassthrough(src opentile.Tiler, w *wsiwriter.Writer) error {
+	for _, a := range src.Associated() {
+		bs, err := a.Bytes()
+		if err != nil {
+			return fmt.Errorf("associated %q bytes: %w", a.Kind(), err)
+		}
+		var subfileType uint32
+		switch a.Kind() {
+		case "thumbnail":
+			subfileType = 0
+		case "label":
+			subfileType = 1
+		case "overview", "macro":
+			subfileType = 9
+		default:
+			subfileType = 0
+		}
+		comp, photo, err := mapAssociatedCompression(a.Compression())
+		if err != nil {
+			return fmt.Errorf("associated %q compression: %w", a.Kind(), err)
+		}
+		if err := w.AddAssociated(wsiwriter.AssociatedSpec{
+			Kind:                      a.Kind(),
+			Compressed:                bs,
+			Width:                     uint32(a.Size().W),
+			Height:                    uint32(a.Size().H),
+			Compression:               comp,
+			PhotometricInterpretation: photo,
+			NewSubfileType:            subfileType,
+		}); err != nil {
+			return fmt.Errorf("AddAssociated %q: %w", a.Kind(), err)
+		}
+	}
+	return nil
+}
+
+// mapAssociatedCompression maps an opentile.Compression to (TIFF tag 259
+// value, TIFF tag 262 PhotometricInterpretation). Photometric is RGB (=2)
+// for JPEG/LZW/None — Aperio stores label/macro/thumbnail in this shape.
+func mapAssociatedCompression(c opentile.Compression) (uint16, uint16, error) {
+	switch c {
+	case opentile.CompressionJPEG:
+		return wsiwriter.CompressionJPEG, 2, nil
+	case opentile.CompressionLZW:
+		return wsiwriter.CompressionLZW, 2, nil
+	case opentile.CompressionNone:
+		return wsiwriter.CompressionNone, 2, nil
+	default:
+		return 0, 0, fmt.Errorf("unsupported associated compression: %s", c)
+	}
+}
+
+// readSourceImageDescription reads TIFF tag 270 (ImageDescription, ASCII)
+// from IFD 0 of a TIFF/BigTIFF file. opentile-go's Tiler does not expose the
+// raw description verbatim; this helper is a minimal one-shot parser.
+func readSourceImageDescription(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	var hdr [16]byte
+	if _, err := io.ReadFull(f, hdr[:8]); err != nil {
+		return "", fmt.Errorf("read header: %w", err)
+	}
+	var bo binary.ByteOrder
+	switch {
+	case hdr[0] == 'I' && hdr[1] == 'I':
+		bo = binary.LittleEndian
+	case hdr[0] == 'M' && hdr[1] == 'M':
+		bo = binary.BigEndian
+	default:
+		return "", fmt.Errorf("not a TIFF file (bad byte-order mark %x %x)", hdr[0], hdr[1])
+	}
+	magic := bo.Uint16(hdr[2:4])
+	var ifdOffset int64
+	bigtiff := false
+	switch magic {
+	case 42:
+		ifdOffset = int64(bo.Uint32(hdr[4:8]))
+	case 0x002B:
+		bigtiff = true
+		// BigTIFF header: bytes 4-5 = offset bytesize (always 8),
+		// bytes 6-7 = constant 0, bytes 8-15 = first-IFD offset.
+		if _, err := io.ReadFull(f, hdr[8:16]); err != nil {
+			return "", fmt.Errorf("read BigTIFF header tail: %w", err)
+		}
+		offsetSize := bo.Uint16(hdr[4:6])
+		if offsetSize != 8 {
+			return "", fmt.Errorf("BigTIFF offset bytesize != 8: got %d", offsetSize)
+		}
+		ifdOffset = int64(bo.Uint64(hdr[8:16]))
+	default:
+		return "", fmt.Errorf("unknown TIFF magic 0x%x", magic)
+	}
+
+	// Walk IFD 0 entries looking for tag 270 (ImageDescription, type 2 ASCII).
+	if _, err := f.Seek(ifdOffset, 0); err != nil {
+		return "", fmt.Errorf("seek IFD: %w", err)
+	}
+
+	var entryCount uint64
+	if bigtiff {
+		var nb [8]byte
+		if _, err := io.ReadFull(f, nb[:]); err != nil {
+			return "", fmt.Errorf("read entry count: %w", err)
+		}
+		entryCount = bo.Uint64(nb[:])
+	} else {
+		var nb [2]byte
+		if _, err := io.ReadFull(f, nb[:]); err != nil {
+			return "", fmt.Errorf("read entry count: %w", err)
+		}
+		entryCount = uint64(bo.Uint16(nb[:]))
+	}
+
+	entrySize := 12
+	if bigtiff {
+		entrySize = 20
+	}
+	entries := make([]byte, int(entryCount)*entrySize)
+	if _, err := io.ReadFull(f, entries); err != nil {
+		return "", fmt.Errorf("read IFD entries: %w", err)
+	}
+
+	for i := uint64(0); i < entryCount; i++ {
+		e := entries[int(i)*entrySize : (int(i)+1)*entrySize]
+		tag := bo.Uint16(e[0:2])
+		typ := bo.Uint16(e[2:4])
+		if tag != 270 || typ != 2 {
+			continue
+		}
+		var count uint64
+		var valueField []byte
+		if bigtiff {
+			count = bo.Uint64(e[4:12])
+			valueField = e[12:20]
+		} else {
+			count = uint64(bo.Uint32(e[4:8]))
+			valueField = e[8:12]
+		}
+		// ASCII strings include a trailing NUL (count counts the NUL too).
+		// If count fits inline (≤ wordSize), valueField holds the bytes;
+		// otherwise valueField holds an offset to the bytes.
+		inlineLimit := 4
+		if bigtiff {
+			inlineLimit = 8
+		}
+		var raw []byte
+		if int(count) <= inlineLimit {
+			raw = valueField[:count]
+		} else {
+			var off int64
+			if bigtiff {
+				off = int64(bo.Uint64(valueField))
+			} else {
+				off = int64(bo.Uint32(valueField))
+			}
+			if _, err := f.Seek(off, 0); err != nil {
+				return "", fmt.Errorf("seek ImageDescription value: %w", err)
+			}
+			raw = make([]byte, count)
+			if _, err := io.ReadFull(f, raw); err != nil {
+				return "", fmt.Errorf("read ImageDescription value: %w", err)
+			}
+		}
+		// Strip trailing NULs (count includes the null terminator).
+		for len(raw) > 0 && raw[len(raw)-1] == 0 {
+			raw = raw[:len(raw)-1]
+		}
+		return string(raw), nil
+	}
+	return "", fmt.Errorf("ImageDescription (tag 270) not found in IFD 0")
+}
