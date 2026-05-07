@@ -1,5 +1,7 @@
 # Sample fixture pool — soft-link to opentile-go's local sample_files/.
-# WSI files are large and not redistributable.
+# WSI files are large and not redistributable. Match both directory and
+# symlink-to-directory forms.
+sample_files
 sample_files/
 
 # Build outputs
