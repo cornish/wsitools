@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+# Cancel in-flight runs when a new commit lands on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-macos:
+    name: build + test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # go.mod's `go` directive (1.26.x) drives the actual toolchain via
+          # GOTOOLCHAIN=auto. setup-go installs a baseline; Go fetches the
+          # exact version go.mod requests on first build.
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Install cgo dependencies
+        run: |
+          brew update
+          brew install jpeg-turbo openjpeg pkg-config libtiff
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (unit)
+        # Integration tests (`-tags integration`) require real SVS fixtures
+        # via WSI_TOOLS_TESTDIR; we don't ship those in CI. Unit tests cover
+        # all packages independently.
+        run: go test ./... -race -count=1
+
+  build-windows:
+    name: build (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-go
+            mingw-w64-x86_64-libjpeg-turbo
+            mingw-w64-x86_64-openjpeg2
+            mingw-w64-x86_64-pkgconf
+
+      - name: go build
+        run: |
+          export PATH=/mingw64/bin:$PATH
+          export PKG_CONFIG_PATH=/mingw64/lib/pkgconfig
+          export CGO_ENABLED=1
+          go env GOOS GOARCH CC CXX
+          go build ./...
+
+      - name: go vet
+        run: |
+          export PATH=/mingw64/bin:$PATH
+          export PKG_CONFIG_PATH=/mingw64/lib/pkgconfig
+          export CGO_ENABLED=1
+          go vet ./...
+
+      # Tests deliberately deferred — running `go test -race` on Windows with
+      # cgo is brittle (msys2 Go vs Windows file-system semantics) and the
+      # full unit suite already passes on macOS. v0.2 will add Windows tests
+      # once the cgo edges are smoothed.

@@ -1,8 +1,12 @@
 # wsi-tools
 
+[![CI](https://github.com/cornish/wsi-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/cornish/wsi-tools/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cornish/wsi-tools.svg)](https://pkg.go.dev/github.com/cornish/wsi-tools)
 
 A Swiss-army knife of utilities for whole-slide imaging (WSI) files used in digital pathology.
+
+See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
 ## v0.1 — what's here
 
