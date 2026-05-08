@@ -151,3 +151,41 @@ func bytesEqual(a, b []byte) bool {
 	}
 	return true
 }
+
+func TestDownsample_AssociatedKindRoundTrip(t *testing.T) {
+	td := testdir(t)
+	src := filepath.Join(td, "svs", "CMU-1.svs")
+	if _, err := os.Stat(src); err != nil {
+		t.Skipf("fixture missing: %v", err)
+	}
+	out := filepath.Join(t.TempDir(), "out.svs")
+	bin := buildOnce(t)
+	if b, err := exec.Command(bin, "downsample", "-o", out, src).CombinedOutput(); err != nil {
+		t.Fatalf("downsample: %v\n%s", err, b)
+	}
+
+	srcTlr, err := opentile.OpenFile(src)
+	if err != nil {
+		t.Fatalf("opentile.OpenFile(src): %v", err)
+	}
+	defer srcTlr.Close()
+	outTlr, err := opentile.OpenFile(out)
+	if err != nil {
+		t.Fatalf("opentile.OpenFile(out): %v", err)
+	}
+	defer outTlr.Close()
+
+	srcKinds := map[string]bool{}
+	for _, a := range srcTlr.Associated() {
+		srcKinds[a.Kind()] = true
+	}
+	outKinds := map[string]bool{}
+	for _, a := range outTlr.Associated() {
+		outKinds[a.Kind()] = true
+	}
+	for k := range srcKinds {
+		if !outKinds[k] {
+			t.Errorf("source had associated %q, output's missing it (kind round-trip broken)", k)
+		}
+	}
+}
