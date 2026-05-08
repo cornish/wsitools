@@ -95,12 +95,13 @@ func WithToolsVersion(s string) Option { return func(c *writerConfig) { c.toolsV
 // imageEntry holds the data for one IFD to be written.
 // If spec is non-nil the entry is tiled (AddLevel); if nil it is stripped (AddStrippedImage).
 type imageEntry struct {
-	tags         []ifdTag
-	stripOffsets []uint32
-	stripCounts  []uint32
-	tileOffsets  []uint64  // populated by LevelHandle.WriteTile
-	tileCounts   []uint64  // populated by LevelHandle.WriteTile
-	spec         *LevelSpec // non-nil for tiled entries
+	tags              []ifdTag
+	stripOffsets      []uint32
+	stripCounts       []uint32
+	tileOffsets       []uint64   // populated by LevelHandle.WriteTile
+	tileCounts        []uint64   // populated by LevelHandle.WriteTile
+	spec              *LevelSpec // non-nil for tiled entries
+	pyramidLevelIndex int        // 0-based index within pyramid levels; -1 for non-pyramid IFDs
 }
 
 // ifdTag represents one TIFF directory entry before encoding.
@@ -193,6 +194,10 @@ type LevelSpec struct {
 	// SubfileType / NewSubfileType for pyramid level signalling. Aperio uses
 	// NewSubfileType=0 for L0 and NewSubfileType=1 (reduced-resolution) for L1+.
 	NewSubfileType uint32
+
+	// WSIImageType, if non-empty, causes TagWSIImageType (65080) to be emitted
+	// in the IFD. Use one of the WSIImageType* constants ("pyramid", "label", etc.).
+	WSIImageType string
 }
 
 // TIFFTag is an opaque carrier for caller-supplied IFD entries (e.g.,
@@ -214,6 +219,10 @@ type AssociatedSpec struct {
 	PhotometricInterpretation uint16
 	NewSubfileType            uint32 // 1 for reduced-res, 9 for label, etc.
 	ExtraTags                 []TIFFTag
+
+	// WSIImageType, if non-empty, causes TagWSIImageType (65080) to be emitted
+	// in the IFD. Use one of the WSIImageType* constants ("label", "macro", etc.).
+	WSIImageType string
 }
 
 // AddAssociated appends a stripped associated-image IFD to the TIFF file.
@@ -259,6 +268,11 @@ func (w *Writer) AddAssociated(s AssociatedSpec) error {
 	// NewSubfileType (tag 254): emit when non-zero.
 	if s.NewSubfileType != 0 {
 		tags = append(tags, w.makeLongTag(254, s.NewSubfileType))
+	}
+
+	// WSIImageType (tag 65080): emit when set.
+	if s.WSIImageType != "" {
+		tags = append(tags, w.makeASCIITag(TagWSIImageType, s.WSIImageType))
 	}
 
 	// Caller-supplied extra tags (emitted verbatim).
@@ -389,6 +403,24 @@ func (w *Writer) Close() (err error) {
 			os.Remove(w.tmpPath)
 		}
 	}()
+
+	// Precompute pyramid level count and per-entry pyramid index for WSI tag emission.
+	pyramidLevelCount := 0
+	for _, e := range w.imgs {
+		if e.spec != nil && e.spec.WSIImageType == WSIImageTypePyramid {
+			pyramidLevelCount++
+		}
+	}
+	w.pyramidLevelCount = pyramidLevelCount
+	pyramidIdx := 0
+	for _, e := range w.imgs {
+		if e.spec != nil && e.spec.WSIImageType == WSIImageTypePyramid {
+			e.pyramidLevelIndex = pyramidIdx
+			pyramidIdx++
+		} else {
+			e.pyramidLevelIndex = -1
+		}
+	}
 
 	// Emit IFDs in order. Strategy:
 	//   1. Write any out-of-band tag values (e.g. BitsPerSample [8,8,8]).
@@ -805,6 +837,15 @@ func (w *Writer) buildTiledTags(entry *imageEntry, isL0 bool) error {
 	// Optional: NewSubfileType (tag 254), only emit when non-zero.
 	if s.NewSubfileType != 0 {
 		tags = append(tags, w.makeLongTag(254, s.NewSubfileType))
+	}
+
+	// Optional: WSIImageType and pyramid level index/count (private tags ≥ 65080).
+	if s.WSIImageType != "" {
+		tags = append(tags, w.makeASCIITag(TagWSIImageType, s.WSIImageType))
+		if s.WSIImageType == WSIImageTypePyramid {
+			tags = append(tags, w.makeLongTag(TagWSILevelIndex, uint32(entry.pyramidLevelIndex)))
+			tags = append(tags, w.makeLongTag(TagWSILevelCount, uint32(w.pyramidLevelCount)))
+		}
 	}
 
 	// Optional: ImageDescription (tag 270, ASCII) — emitted on L0 only.
