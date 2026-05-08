@@ -34,7 +34,9 @@ func Open(path string) (Source, error) {
 			return nil, fmt.Errorf("%w: OME-OneFrame", ErrUnsupportedFormat)
 		}
 	}
-	desc := ReadSourceImageDescription(path) // implemented in imagedesc.go (Task B3)
+	// ReadSourceImageDescription returns ("", err) for non-TIFF sources
+	// (e.g. IFE) — silence the error and treat "" as "no description".
+	desc, _ := ReadSourceImageDescription(path)
 	return &opentileSource{t: t, path: path, desc: desc}, nil
 }
 
@@ -156,8 +158,3 @@ func mapOpentileCompression(c opentile.Compression) Compression {
 	return CompressionUnknown
 }
 
-// Temporary stub; real implementation lands in Task B3 (imagedesc.go).
-// REMOVE THIS WHEN imagedesc.go IS ADDED.
-func ReadSourceImageDescription(path string) string {
-	return ""
-}
