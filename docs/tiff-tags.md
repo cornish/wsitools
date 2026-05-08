@@ -40,3 +40,25 @@ Pinned against:
 
 When opening any newly-written TIFF in `tiffinfo`, the Compression line should
 match these values exactly.
+
+## wsi-tools private TIFF tags
+
+Tag values in the private range (≥ 32768) used by wsi-tools to make output
+files self-describing. Future opentile-go releases can be taught to read these
+tags as authoritative for WSI image classification.
+
+| Tag | Name | Type | Where emitted | Purpose |
+|---|---|---|---|---|
+| 65080 | WSIImageType | ASCII | every IFD (pyramid + associated) | One of: `pyramid`, `label`, `macro`, `overview`, `thumbnail`, `probability`, `map`, `associated`. Authoritative for image classification. |
+| 65081 | WSILevelIndex | LONG | pyramid IFDs only | 0-based pyramid level index (L0 = 0, L1 = 1, …). |
+| 65082 | WSILevelCount | LONG | pyramid IFDs only | Total pyramid levels in this file. |
+| 65083 | WSISourceFormat | ASCII | L0 only | The source format wsi-tools transcoded from (e.g. `svs`, `philips-tiff`, `ome-tiff`). |
+| 65084 | WSIToolsVersion | ASCII | L0 only | The wsi-tools version that produced this file (e.g. `0.2.0`). |
+
+## DICOM-WSI alignment
+
+The WSIImageType vocabulary aligns with DICOM Whole Slide Imaging (PS3.3
+Sup. 145), which uses VOLUME / LABEL / OVERVIEW / THUMBNAIL as standard
+ImageType values for WSI files. We use lowercase + the additional values
+`pyramid`, `macro`, `probability`, `map`, `associated` to match opentile-go's
+existing AssociatedImage.Kind() vocabulary.
