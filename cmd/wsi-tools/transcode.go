@@ -1,0 +1,372 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"runtime"
+	"strings"
+	"time"
+
+	opentile "github.com/cornish/opentile-go"
+	"github.com/spf13/cobra"
+
+	codec "github.com/cornish/wsi-tools/internal/codec"
+	"github.com/cornish/wsi-tools/internal/decoder"
+	"github.com/cornish/wsi-tools/internal/pipeline"
+	"github.com/cornish/wsi-tools/internal/source"
+	"github.com/cornish/wsi-tools/internal/wsiwriter"
+)
+
+var (
+	tcOutput    string
+	tcCodec     string
+	tcQuality   int
+	tcCodecOpts []string
+	tcContainer string
+	tcJobs      int
+	tcBigTIFF   string
+	tcForce     bool
+)
+
+var transcodeCmd = &cobra.Command{
+	Use:   "transcode [flags] <input>",
+	Short: "Re-encode the pyramid tiles in a different compression codec",
+	Long: `Re-encode the pyramid tiles of a WSI in a different compression codec
+while preserving the source's tile geometry and metadata. Associated images
+(label, macro, thumbnail, overview) are passed through verbatim.
+
+Output container defaults:
+  --codec jpeg on SVS source: SVS-shaped output (Aperio convention).
+  Everything else: generic pyramidal TIFF with WSIImageType-tagged IFDs.
+
+v0.2.0 supported source formats: SVS, Philips-TIFF, OME-TIFF (tiled), BIF, IFE,
+generic-TIFF. NDPI, OME-OneFrame, and Leica SCN error cleanly with
+ErrUnsupportedFormat.
+
+Examples:
+
+  # SVS to JPEG-XL (generic TIFF output, since JPEG-XL doesn't fit SVS).
+  wsi-tools transcode --codec jpegxl -o slide-jxl.tiff slide.svs
+
+  # SVS re-encoded as JPEG at a different quality (still SVS-shaped).
+  wsi-tools transcode --codec jpeg --quality 75 -o slide-q75.svs slide.svs
+
+  # AVIF with a faster encoder preset.
+  wsi-tools transcode --codec avif --codec-opt avif.speed=8 -o out.tiff in.svs
+
+  # Lossless WebP for archival.
+  wsi-tools transcode --codec webp --codec-opt webp.lossless=true -o out.tiff in.svs`,
+	Args: cobra.ExactArgs(1),
+	RunE: runTranscode,
+}
+
+func init() {
+	transcodeCmd.Flags().StringVarP(&tcOutput, "output", "o", "", "output file path (required)")
+	transcodeCmd.Flags().StringVar(&tcCodec, "codec", "", "target codec: jpeg|jpegxl|avif|webp|htj2k")
+	transcodeCmd.Flags().IntVar(&tcQuality, "quality", 85, "codec-agnostic quality 1..100")
+	transcodeCmd.Flags().StringSliceVar(&tcCodecOpts, "codec-opt", nil, "codec-specific KEY=VAL (repeatable)")
+	transcodeCmd.Flags().StringVar(&tcContainer, "container", "", "output container: svs|tiff (default depends on source + codec)")
+	transcodeCmd.Flags().IntVar(&tcJobs, "jobs", runtime.NumCPU(), "worker goroutines")
+	transcodeCmd.Flags().StringVar(&tcBigTIFF, "bigtiff", "auto", "auto|on|off")
+	transcodeCmd.Flags().BoolVarP(&tcForce, "force", "f", false, "overwrite output if it exists")
+	_ = transcodeCmd.MarkFlagRequired("output")
+	_ = transcodeCmd.MarkFlagRequired("codec")
+	rootCmd.AddCommand(transcodeCmd)
+}
+
+func runTranscode(cmd *cobra.Command, args []string) error {
+	cmd.SilenceUsage = true
+	input := args[0]
+	start := time.Now()
+
+	if _, err := os.Stat(input); err != nil {
+		return fmt.Errorf("input %s: %w", input, err)
+	}
+	if !tcForce {
+		if _, err := os.Stat(tcOutput); err == nil {
+			return fmt.Errorf("output %s already exists (use --force)", tcOutput)
+		}
+	}
+	if tcQuality < 1 || tcQuality > 100 {
+		return fmt.Errorf("--quality must be 1..100")
+	}
+
+	fac, err := codec.Lookup(tcCodec)
+	if err != nil {
+		return fmt.Errorf("--codec %q: %w", tcCodec, err)
+	}
+
+	src, err := source.Open(input)
+	if err != nil {
+		if errors.Is(err, source.ErrUnsupportedFormat) {
+			return fmt.Errorf("source format unsupported at v0.2.0: %w", err)
+		}
+		return fmt.Errorf("open source: %w", err)
+	}
+	defer src.Close()
+
+	container := resolveContainer(src.Format(), tcCodec, tcContainer)
+	bigtiff := resolveBigTIFF(tcBigTIFF, src)
+
+	knobs := map[string]string{"q": fmt.Sprintf("%d", tcQuality)}
+	for _, opt := range tcCodecOpts {
+		k, v, ok := strings.Cut(opt, "=")
+		if !ok {
+			return fmt.Errorf("--codec-opt %q: missing '='", opt)
+		}
+		// Strip codec prefix when present (e.g. "jxl.distance=1.5" → "distance").
+		if pfx := tcCodec + "."; strings.HasPrefix(k, pfx) {
+			k = k[len(pfx):]
+		} else if dotPfx := strings.SplitN(k, ".", 2); len(dotPfx) == 2 {
+			k = dotPfx[1]
+		}
+		knobs[k] = v
+	}
+
+	// Build writer options.
+	wOpts := []wsiwriter.Option{
+		wsiwriter.WithBigTIFF(bigtiff),
+		wsiwriter.WithToolsVersion("0.2.0-dev"),
+		wsiwriter.WithSourceFormat(src.Format()),
+	}
+	md := src.Metadata()
+	if md.Make != "" {
+		wOpts = append(wOpts, wsiwriter.WithMake(md.Make))
+	}
+	if md.Model != "" {
+		wOpts = append(wOpts, wsiwriter.WithModel(md.Model))
+	}
+	if md.Software != "" {
+		wOpts = append(wOpts, wsiwriter.WithSoftware(md.Software))
+	}
+	if !md.AcquisitionDateTime.IsZero() {
+		wOpts = append(wOpts, wsiwriter.WithDateTime(md.AcquisitionDateTime))
+	}
+	if container == "svs" && src.Format() == string(opentile.FormatSVS) {
+		// SVS-shaped output: re-emit Aperio ImageDescription verbatim.
+		if desc := src.SourceImageDescription(); desc != "" {
+			wOpts = append(wOpts, wsiwriter.WithImageDescription(desc))
+		}
+	} else {
+		// Generic TIFF: assemble a wsi-tools provenance string.
+		wOpts = append(wOpts, wsiwriter.WithImageDescription(buildProvenanceDesc(src, tcCodec, md)))
+	}
+
+	w, err := wsiwriter.Create(tcOutput, wOpts...)
+	if err != nil {
+		return fmt.Errorf("create output: %w", err)
+	}
+
+	if err := transcodePyramid(cmd.Context(), src, w, fac, knobs, tcJobs, container); err != nil {
+		w.Close() // tmp removed by Close
+		return err
+	}
+
+	if err := writeAssociatedImages(src, w, container); err != nil {
+		w.Close()
+		return err
+	}
+
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("close output: %w", err)
+	}
+
+	stat, _ := os.Stat(tcOutput)
+	if stat != nil {
+		slog.Info("transcode complete",
+			"output", tcOutput,
+			"size", formatBytes(stat.Size()),
+			"elapsed", time.Since(start).Round(time.Millisecond),
+		)
+		fmt.Printf("wrote %s (%s, %s)\n", tcOutput, formatBytes(stat.Size()), time.Since(start).Round(time.Millisecond))
+	}
+	return nil
+}
+
+func resolveContainer(srcFormat, codecName, override string) string {
+	if override != "" {
+		return override
+	}
+	if srcFormat == string(opentile.FormatSVS) && codecName == "jpeg" {
+		return "svs"
+	}
+	return "tiff"
+}
+
+func resolveBigTIFF(mode string, src source.Source) bool {
+	switch mode {
+	case "on":
+		return true
+	case "off":
+		return false
+	}
+	// auto: predict output size; promote when > 2 GiB.
+	// Estimate ~1 byte per pixel for lossy codecs.
+	var total int64
+	for _, lvl := range src.Levels() {
+		total += int64(lvl.Size().X) * int64(lvl.Size().Y)
+	}
+	return total > (2 << 30)
+}
+
+func transcodePyramid(ctx context.Context, src source.Source, w *wsiwriter.Writer, fac codec.EncoderFactory, knobs map[string]string, workers int, container string) error {
+	for _, lvl := range src.Levels() {
+		if err := transcodeLevel(ctx, lvl, w, fac, knobs, workers); err != nil {
+			return fmt.Errorf("level %d: %w", lvl.Index(), err)
+		}
+	}
+	return nil
+}
+
+func transcodeLevel(ctx context.Context, lvl source.Level, w *wsiwriter.Writer, fac codec.EncoderFactory, knobs map[string]string, workers int) error {
+	enc, err := fac.NewEncoder(codec.LevelGeometry{
+		TileWidth: lvl.TileSize().X, TileHeight: lvl.TileSize().Y,
+		PixelFormat: codec.PixelFormatRGB8,
+	}, codec.Quality{Knobs: knobs})
+	if err != nil {
+		return err
+	}
+	defer enc.Close()
+
+	spec := wsiwriter.LevelSpec{
+		ImageWidth:                uint32(lvl.Size().X),
+		ImageHeight:               uint32(lvl.Size().Y),
+		TileWidth:                 uint32(lvl.TileSize().X),
+		TileHeight:                uint32(lvl.TileSize().Y),
+		Compression:               enc.TIFFCompressionTag(),
+		PhotometricInterpretation: 2, // RGB; codecs carry their own colour model
+		JPEGTables:                enc.LevelHeader(),
+		JPEGAbbreviatedTiles:      enc.TIFFCompressionTag() == wsiwriter.CompressionJPEG,
+		NewSubfileType:            0, // pyramid IFDs always non-reduced (Aperio classifier rule)
+		WSIImageType:              wsiwriter.WSIImageTypePyramid,
+	}
+	for _, t := range enc.ExtraTIFFTags() {
+		spec.ExtraTags = append(spec.ExtraTags, t)
+	}
+
+	lh, err := w.AddLevel(spec)
+	if err != nil {
+		return err
+	}
+
+	dec := pickDecoder(lvl.Compression())
+	if dec == nil {
+		return fmt.Errorf("no decoder for source compression %s", lvl.Compression())
+	}
+
+	grid := lvl.Grid()
+	tileBytes := lvl.TileSize().X * lvl.TileSize().Y * 3
+	tileW := lvl.TileSize().X
+	tileH := lvl.TileSize().Y
+	return pipeline.Run(ctx, pipeline.Config{
+		Workers: workers,
+		Source: func(ctx context.Context, emit func(pipeline.Tile) error) error {
+			for ty := 0; ty < grid.Y; ty++ {
+				for tx := 0; tx < grid.X; tx++ {
+					b, err := lvl.Tile(tx, ty)
+					if err != nil {
+						return err
+					}
+					if err := emit(pipeline.Tile{Level: lvl.Index(), X: uint32(tx), Y: uint32(ty), Bytes: b}); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+		Process: func(t pipeline.Tile) (pipeline.Tile, error) {
+			rgb := make([]byte, tileBytes)
+			rgbOut, err := dec.DecodeTile(t.Bytes, rgb, 1, 1)
+			if err != nil {
+				return pipeline.Tile{}, err
+			}
+			encoded, err := enc.EncodeTile(rgbOut, tileW, tileH, nil)
+			if err != nil {
+				return pipeline.Tile{}, err
+			}
+			t.Bytes = encoded
+			return t, nil
+		},
+		Sink: func(t pipeline.Tile) error {
+			return lh.WriteTile(t.X, t.Y, t.Bytes)
+		},
+	})
+}
+
+func pickDecoder(c source.Compression) decoder.Decoder {
+	switch c {
+	case source.CompressionJPEG:
+		return decoder.NewJPEG()
+	case source.CompressionJPEG2000:
+		return decoder.NewJPEG2000()
+	}
+	return nil
+}
+
+func writeAssociatedImages(src source.Source, w *wsiwriter.Writer, container string) error {
+	for _, a := range src.Associated() {
+		bs, err := a.Bytes()
+		if err != nil {
+			return fmt.Errorf("associated %s: %w", a.Kind(), err)
+		}
+		spec := wsiwriter.AssociatedSpec{
+			Kind:                      a.Kind(),
+			Compressed:                bs,
+			Width:                     uint32(a.Size().X),
+			Height:                    uint32(a.Size().Y),
+			Compression:               mapCompressionForOutput(a.Compression()),
+			PhotometricInterpretation: 2,
+			NewSubfileType:            newSubfileTypeFor(container, a.Kind()),
+			WSIImageType:              a.Kind(),
+		}
+		if err := w.AddAssociated(spec); err != nil {
+			return fmt.Errorf("write associated %s: %w", a.Kind(), err)
+		}
+	}
+	return nil
+}
+
+func mapCompressionForOutput(c source.Compression) uint16 {
+	switch c {
+	case source.CompressionJPEG:
+		return wsiwriter.CompressionJPEG
+	case source.CompressionLZW:
+		return wsiwriter.CompressionLZW
+	case source.CompressionJPEG2000:
+		return wsiwriter.CompressionJPEG2000
+	}
+	return wsiwriter.CompressionNone
+}
+
+func newSubfileTypeFor(container, kind string) uint32 {
+	if container == "svs" {
+		switch kind {
+		case "label":
+			return 1
+		case "macro", "overview":
+			return 9
+		}
+	}
+	return 1 // generic TIFF: any associated image is reduced-resolution
+}
+
+func buildProvenanceDesc(src source.Source, codecName string, md source.Metadata) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "wsi-tools/0.2.0-dev transcode source=%s codec=%s", src.Format(), codecName)
+	if md.MPP > 0 {
+		fmt.Fprintf(&b, " mpp=%v", md.MPP)
+	}
+	if md.Magnification > 0 {
+		fmt.Fprintf(&b, " mag=%vx", md.Magnification)
+	}
+	if md.Make != "" || md.Model != "" {
+		fmt.Fprintf(&b, " scanner=%q", strings.TrimSpace(md.Make+" "+md.Model))
+	}
+	if !md.AcquisitionDateTime.IsZero() {
+		fmt.Fprintf(&b, " date=%s", md.AcquisitionDateTime.Format("2006-01-02"))
+	}
+	return b.String()
+}
