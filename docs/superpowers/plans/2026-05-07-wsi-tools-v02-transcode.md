@@ -1268,7 +1268,9 @@ git commit -m "feat(wsiwriter): WSIImageType + WSILevelIndex/Count emission"
 
 ---
 
-## Batch D — jpegli codec wrapper (1 task)
+## Batch D — jpegli codec wrapper (DEFERRED to v0.2.1+)
+
+> **Status: deferred from v0.2.0.** Homebrew's `jpeg-xl 0.11.2` bottle ships libjxl without `libjpegli` and the `jpegli/encode.h` header — many distros disable jpegli to avoid libjpeg symbol conflicts. v0.2.0 ships without jpegli; the existing v0.1 `jpeg` codec wrapper remains available for SVS-shaped JPEG re-encoding. The Task D content below is preserved verbatim for v0.2.1+ pickup once a build-from-source path or upstream re-enable lands.
 
 ### Task D1: jpegli codec wrapper (libjxl)
 

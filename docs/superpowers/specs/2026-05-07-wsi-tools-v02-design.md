@@ -13,7 +13,7 @@ Ship `wsi-tools transcode` end-to-end on a useful subset of WSI source formats a
 **v0.2.0 baseline (this spec):**
 
 - `wsi-tools transcode` subcommand (cobra).
-- **5 new codec wrappers**: **JPEG-XL** (libjxl), **jpegli** (libjxl), **AVIF** (libavif), **WebP** (libwebp), **HTJ2K** (OpenJPH). The `jpeg` codec from v0.1 also becomes available as a transcode target for free (re-encode at a different `--quality`), bringing the transcode CLI's `--codec` flag to 6 accepted values total.
+- **4 new codec wrappers**: **JPEG-XL** (libjxl), **AVIF** (libavif), **WebP** (libwebp), **HTJ2K** (OpenJPH). The `jpeg` codec from v0.1 also becomes available as a transcode target for free (re-encode at a different `--quality`), bringing the transcode CLI's `--codec` flag to 5 accepted values total. **jpegli was originally part of v0.2.0** but Homebrew's `jpeg-xl 0.11.2` bottle ships libjxl without jpegli (upstream disables it to avoid libjpeg symbol-conflicts); deferred to v0.2.1+ when we either get an upstream re-enable or stand up a build-from-source path.
 - 6 sane source formats: **SVS, Philips-TIFF, OME-TIFF (tiled SubIFD path), BIF, IFE, generic-TIFF**. NDPI, OME-OneFrame, and Leica SCN reject cleanly with `ErrUnsupportedFormat` (Leica SCN's multi-image + multi-channel structure is out of scope for v0.2.0's single-pyramid streaming model).
 - **Streaming pyramid build** — per-tile decode → encode → write, no L0 raster materialisation. Memory ceiling drops three orders of magnitude vs. v0.1 downsample.
 - New private TIFF tags `WSIImageType` (65080) + `WSILevelIndex` (65081) + `WSILevelCount` (65082) + `WSISourceFormat` (65083) + `WSIToolsVersion` (65084) for self-describing output.
@@ -22,7 +22,7 @@ Ship `wsi-tools transcode` end-to-end on a useful subset of WSI source formats a
 
 **Deferred to v0.2.1+:**
 
-- Codecs beyond the v0.2.0 five: HEIF, JPEG-LS, JPEG-XR, Basis Universal, plus jpeg / jpeg2000 as transcode targets (their decoders are already shipped at v0.1).
+- Codecs beyond the v0.2.0 four: jpegli (deferred per Homebrew packaging gap), HEIF, JPEG-LS, JPEG-XR, Basis Universal, plus jpeg2000 as a transcode target (decoder already shipped at v0.1).
 - Streaming retrofit for `downsample` (fast-follow once the streaming pattern is proven on transcode).
 - `--re-encode-associated` flag (v0.2 default is verbatim passthrough).
 - Format-native metadata blob preservation (Philips XML, OME-XML, vendor tags).
