@@ -8,20 +8,28 @@ A Swiss-army knife of utilities for whole-slide imaging (WSI) files used in digi
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
-## v0.1 — what's here
+## v0.2 — what's here
 
 - `wsi-tools downsample` — downsample a WSI by a power-of-2 factor (e.g. 40x → 20x).
   Regenerates the full pyramid from the new base. Passes through associated images
-  (label, macro, thumbnail, overview) verbatim. SVS-only at v0.1.
+  (label, macro, thumbnail, overview) verbatim. SVS-only.
+- `wsi-tools transcode` — re-encode the pyramid in a different codec while preserving
+  source tile geometry and associated images. Streaming (no L0 raster materialisation).
+  Five codec targets: `jpeg`, `jpegxl`, `avif`, `webp`, `htj2k`. Six source formats:
+  SVS, Philips-TIFF, OME-TIFF (tiled), BIF, IFE, generic-TIFF. NDPI, OME-OneFrame,
+  and Leica SCN error cleanly with `ErrUnsupportedFormat`.
 - `wsi-tools doctor` — report installed codec libraries.
 - `wsi-tools version` — print version + Go runtime info.
 
 ## Future
 
-- `wsi-tools transcode` — re-encode a WSI in alternative codecs (JPEG-XL, AVIF, WebP, jpegli, HEIF, JPEG-LS, JPEG-XR, HTJ2K, Basis Universal). v0.2.
-- NDPI / Philips / OME-TIFF / BIF / IFE source support. v0.2+.
-- Streaming pyramid build (current v0.1 holds full L0 raster in memory). v0.2.
-- Lanczos resampler for non-power-of-2 factors. v0.2.
+- `jpegli` codec target (deferred from v0.2.0; Homebrew jpeg-xl bottle ships
+  libjxl without libjpegli). v0.2.1+ once upstream re-enables or we stand up a
+  build-from-source path.
+- HEIF, JPEG-LS, JPEG-XR, Basis Universal codec targets. v0.2.x.
+- NDPI + OME-OneFrame source support via virtual-tile materialisation. v0.3.
+- Streaming retrofit for `downsample` (currently holds full L0 raster in memory). v0.2.x.
+- Lanczos resampler for non-power-of-2 factors. v0.3.
 - GUI front-end. v0.4+.
 - Absorption of `cornish/wsi-label-tools` (label remove / replace).
 
@@ -30,10 +38,22 @@ See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 cgo dependencies (macOS via Homebrew):
 
 ```sh
-brew install jpeg-turbo openjpeg
+brew install jpeg-turbo openjpeg jpeg-xl libavif webp openjph
 ```
 
-`pkg-config` resolves both at build time. Linux equivalents: `apt install libturbojpeg0-dev libopenjp2-7-dev`.
+`pkg-config` resolves all of them at build time. Linux equivalents (Debian/Ubuntu):
+
+```sh
+apt install libturbojpeg0-dev libopenjp2-7-dev libjxl-dev libavif-dev libwebp-dev
+# OpenJPH (HTJ2K) typically requires source build on Linux as of 2026-05.
+```
+
+Build a slim binary that skips selected codecs via build tags:
+
+```sh
+go build -tags 'noavif nowebp nohtj2k' ./cmd/wsi-tools   # only JPEG-XL + JPEG
+go build -tags 'nojxl noavif nowebp nohtj2k' ./cmd/wsi-tools   # only JPEG (v0.1 surface)
+```
 
 ## Install
 
@@ -42,6 +62,8 @@ go install github.com/cornish/wsi-tools/cmd/wsi-tools@latest
 ```
 
 ## Usage
+
+### Downsample
 
 ```sh
 # 40x SVS → 20x SVS (factor 2 default)
@@ -52,7 +74,30 @@ wsi-tools downsample --factor 4 --quality 95 -o slide-10x.svs slide-40x.svs
 
 # Or via target magnification
 wsi-tools downsample --target-mag 10 -o slide-10x.svs slide-40x.svs
+```
 
+### Transcode
+
+```sh
+# SVS to JPEG-XL (output is a generic pyramidal TIFF with WSIImageType-tagged IFDs)
+wsi-tools transcode --codec jpegxl -o slide-jxl.tiff slide.svs
+
+# SVS re-encoded as JPEG at a different quality (still SVS-shaped)
+wsi-tools transcode --codec jpeg --quality 75 -o slide-q75.svs slide.svs
+
+# AVIF with a faster encoder preset
+wsi-tools transcode --codec avif --codec-opt avif.speed=8 -o out.tiff in.svs
+
+# Lossless WebP for archival
+wsi-tools transcode --codec webp --codec-opt webp.lossless=true -o out.tiff in.svs
+
+# HTJ2K
+wsi-tools transcode --codec htj2k -o out.tiff in.svs
+```
+
+### Other
+
+```sh
 # Check installed codec libs
 wsi-tools doctor
 

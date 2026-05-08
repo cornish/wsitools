@@ -29,7 +29,9 @@ jobs:
       - name: Install cgo dependencies
         run: |
           brew update
-          brew install jpeg-turbo openjpeg pkg-config libtiff
+          # v0.1: jpeg-turbo, openjpeg. v0.2 adds: jpeg-xl (libjxl), libavif,
+          # webp, openjph (OpenJPH for HTJ2K).
+          brew install jpeg-turbo openjpeg pkg-config libtiff jpeg-xl libavif webp openjph
 
       - name: go build
         run: go build ./...
@@ -56,29 +58,35 @@ jobs:
         with:
           msystem: MINGW64
           update: true
+          # v0.2 codec deps: libjxl (jpegxl), libavif, libwebp.
+          # OpenJPH (htj2k) is NOT packaged on msys2 as of 2026-05; the
+          # Windows build skips it via -tags nohtj2k below.
           install: >-
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-go
             mingw-w64-x86_64-libjpeg-turbo
             mingw-w64-x86_64-openjpeg2
+            mingw-w64-x86_64-libjxl
+            mingw-w64-x86_64-libavif
+            mingw-w64-x86_64-libwebp
             mingw-w64-x86_64-pkgconf
 
-      - name: go build
+      - name: go build (Windows, htj2k disabled — openjph not packaged for msys2)
         run: |
           export PATH=/mingw64/bin:$PATH
           export PKG_CONFIG_PATH=/mingw64/lib/pkgconfig
           export CGO_ENABLED=1
           go env GOOS GOARCH CC CXX
-          go build ./...
+          go build -tags nohtj2k ./...
 
       - name: go vet
         run: |
           export PATH=/mingw64/bin:$PATH
           export PKG_CONFIG_PATH=/mingw64/lib/pkgconfig
           export CGO_ENABLED=1
-          go vet ./...
+          go vet -tags nohtj2k ./...
 
       # Tests deliberately deferred — running `go test -race` on Windows with
       # cgo is brittle (msys2 Go vs Windows file-system semantics) and the
-      # full unit suite already passes on macOS. v0.2 will add Windows tests
-      # once the cgo edges are smoothed.
+      # full unit suite already passes on macOS. v0.2.x will add Windows tests
+      # once the cgo edges are smoothed and OpenJPH is packaged.
