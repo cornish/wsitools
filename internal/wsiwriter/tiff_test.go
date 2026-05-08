@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	xtiff "golang.org/x/image/tiff"
 )
@@ -263,5 +264,46 @@ func TestImageDescription(t *testing.T) {
 	got := string(out)
 	if !strings.Contains(got, "AppMag = 20") {
 		t.Errorf("ImageDescription not in output:\n%s", got)
+	}
+}
+
+func TestWriterOptions_StandardMetadata(t *testing.T) {
+	if _, err := exec.LookPath("tiffinfo"); err != nil {
+		t.Skip("tiffinfo missing")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "with-md.tiff")
+	when := time.Date(2026, 1, 15, 13, 14, 15, 0, time.UTC)
+
+	w, err := Create(path,
+		WithBigTIFF(true),
+		WithMake("Hamamatsu"),
+		WithModel("C9600"),
+		WithSoftware("wsi-tools/0.2.0-dev"),
+		WithDateTime(when),
+		WithSourceFormat("philips-tiff"),
+		WithToolsVersion("0.2.0-dev"),
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	level, _ := w.AddLevel(LevelSpec{
+		ImageWidth: 8, ImageHeight: 8, TileWidth: 8, TileHeight: 8,
+		Compression: CompressionNone, PhotometricInterpretation: 2,
+	})
+	level.WriteTile(0, 0, make([]byte, 8*8*3))
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command("tiffinfo", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("tiffinfo: %v\n%s", err, out)
+	}
+	got := string(out)
+	for _, want := range []string{"Hamamatsu", "C9600", "wsi-tools/0.2.0-dev", "2026:01:15 13:14:15"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in tiffinfo output, got:\n%s", want, got)
+		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"time"
 )
 
 // Writer writes a TIFF file. Construct via Create.
@@ -19,6 +20,20 @@ type Writer struct {
 	imgs             []*imageEntry
 	closed           bool
 	imageDescription string // optional; emitted as tag 270 on L0 only
+
+	// Standard TIFF metadata tags emitted on L0 when set.
+	make_       string
+	model       string
+	software    string
+	dateTime    time.Time
+	hasDateTime bool
+
+	// wsi-tools private metadata tags emitted on L0 when set.
+	sourceFormat string // → TagWSISourceFormat
+	toolsVersion string // → TagWSIToolsVersion
+
+	// pyramidLevelCount is set in Close() after counting pyramid IFDs.
+	pyramidLevelCount int
 }
 
 // Option is a functional option for Create.
@@ -28,6 +43,17 @@ type writerConfig struct {
 	bo               binary.ByteOrder
 	bigtiff          bool
 	imageDescription string
+
+	// Standard TIFF metadata tags emitted on L0 when set.
+	make_       string // trailing underscore avoids the Go keyword
+	model       string
+	software    string
+	dateTime    time.Time
+	hasDateTime bool
+
+	// wsi-tools private metadata tags emitted on L0 when set.
+	sourceFormat string // → TagWSISourceFormat
+	toolsVersion string // → TagWSIToolsVersion
 }
 
 // WithByteOrder sets the byte order for the TIFF file (default: LittleEndian).
@@ -41,6 +67,30 @@ func WithBigTIFF(b bool) Option { return func(c *writerConfig) { c.bigtiff = b }
 func WithImageDescription(s string) Option {
 	return func(c *writerConfig) { c.imageDescription = s }
 }
+
+// WithMake sets the TIFF Make tag (271) on the L0 IFD.
+func WithMake(s string) Option { return func(c *writerConfig) { c.make_ = s } }
+
+// WithModel sets the TIFF Model tag (272) on the L0 IFD.
+func WithModel(s string) Option { return func(c *writerConfig) { c.model = s } }
+
+// WithSoftware sets the TIFF Software tag (305) on the L0 IFD.
+func WithSoftware(s string) Option { return func(c *writerConfig) { c.software = s } }
+
+// WithDateTime sets the TIFF DateTime tag (306) on the L0 IFD, formatted as
+// "YYYY:MM:DD HH:MM:SS" per TIFF 6.0.
+func WithDateTime(t time.Time) Option {
+	return func(c *writerConfig) { c.dateTime = t; c.hasDateTime = true }
+}
+
+// WithSourceFormat sets the wsi-tools private tag WSISourceFormat (65083) on
+// the L0 IFD. The value should be the source format name (e.g. "svs",
+// "philips-tiff", "ome-tiff").
+func WithSourceFormat(s string) Option { return func(c *writerConfig) { c.sourceFormat = s } }
+
+// WithToolsVersion sets the wsi-tools private tag WSIToolsVersion (65084) on
+// the L0 IFD. The value should be the wsi-tools version string (e.g. "0.2.0").
+func WithToolsVersion(s string) Option { return func(c *writerConfig) { c.toolsVersion = s } }
 
 // imageEntry holds the data for one IFD to be written.
 // If spec is non-nil the entry is tiled (AddLevel); if nil it is stripped (AddStrippedImage).
@@ -89,7 +139,22 @@ func Create(path string, opts ...Option) (*Writer, error) {
 	if cfg.bigtiff {
 		wordSize = 8
 	}
-	w := &Writer{path: path, tmpPath: tmp, f: f, bo: cfg.bo, bigtiff: cfg.bigtiff, wordSize: wordSize, imageDescription: cfg.imageDescription}
+	w := &Writer{
+		path:             path,
+		tmpPath:          tmp,
+		f:                f,
+		bo:               cfg.bo,
+		bigtiff:          cfg.bigtiff,
+		wordSize:         wordSize,
+		imageDescription: cfg.imageDescription,
+		make_:            cfg.make_,
+		model:            cfg.model,
+		software:         cfg.software,
+		dateTime:         cfg.dateTime,
+		hasDateTime:      cfg.hasDateTime,
+		sourceFormat:     cfg.sourceFormat,
+		toolsVersion:     cfg.toolsVersion,
+	}
 	if err := w.writeHeader(); err != nil {
 		f.Close()
 		os.Remove(tmp)
@@ -679,6 +744,11 @@ func (w *Writer) makeASCIITag(tag uint16, s string) ifdTag {
 	return ifdTag{tag: tag, typ: tiffTypeASCII, count: uint64(len(b)), value: b}
 }
 
+// formatTIFFDateTime formats t as TIFF 6.0's "YYYY:MM:DD HH:MM:SS" datetime.
+func formatTIFFDateTime(t time.Time) string {
+	return t.Format("2006:01:02 15:04:05")
+}
+
 // buildTiledTags constructs the IFD tag list for a tiled imageEntry.
 // Must be called after all WriteTile calls have populated entry.tileOffsets
 // and entry.tileCounts. isL0 indicates whether this is the first (L0) IFD,
@@ -740,6 +810,28 @@ func (w *Writer) buildTiledTags(entry *imageEntry, isL0 bool) error {
 	// Optional: ImageDescription (tag 270, ASCII) — emitted on L0 only.
 	if isL0 && w.imageDescription != "" {
 		tags = append(tags, w.makeASCIITag(270, w.imageDescription))
+	}
+
+	// Optional standard metadata tags — emitted on L0 only.
+	if isL0 {
+		if w.make_ != "" {
+			tags = append(tags, w.makeASCIITag(271, w.make_))   // Make
+		}
+		if w.model != "" {
+			tags = append(tags, w.makeASCIITag(272, w.model))   // Model
+		}
+		if w.software != "" {
+			tags = append(tags, w.makeASCIITag(305, w.software)) // Software
+		}
+		if w.hasDateTime {
+			tags = append(tags, w.makeASCIITag(306, formatTIFFDateTime(w.dateTime))) // DateTime
+		}
+		if w.sourceFormat != "" {
+			tags = append(tags, w.makeASCIITag(TagWSISourceFormat, w.sourceFormat))
+		}
+		if w.toolsVersion != "" {
+			tags = append(tags, w.makeASCIITag(TagWSIToolsVersion, w.toolsVersion))
+		}
 	}
 
 	// Optional: JPEGTables (tag 347, type UNDEFINED).
