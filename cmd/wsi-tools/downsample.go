@@ -209,14 +209,63 @@ func runDownsample(cmd *cobra.Command, args []string) error {
 		"out_h", outH,
 	)
 
+	// Segregate associated images by Kind so we can interleave them into the
+	// IFD stream in Aperio's quirky order:
+	//   L0, [thumbnail], L1, L2, …, LN, label, macro
+	// opentile-go's SVS classifier takes the LAST 2 trailing pages as
+	// label + macro (by SubfileType 9 = macro, else label), so they MUST come
+	// after all pyramid levels. thumbnail (non-tiled) belongs between L0 and L1.
+	var thumbnail, label, macro opentile.AssociatedImage
+	var otherAssoc []opentile.AssociatedImage
+	for _, a := range src.Associated() {
+		switch a.Kind() {
+		case "thumbnail":
+			thumbnail = a
+		case "label":
+			label = a
+		case "macro", "overview":
+			macro = a
+		default:
+			otherAssoc = append(otherAssoc, a)
+		}
+	}
+	if len(otherAssoc) > 0 {
+		var kinds []string
+		for _, a := range otherAssoc {
+			kinds = append(kinds, a.Kind())
+		}
+		slog.Warn("dropping associated images not supported by Aperio classifier",
+			"count", len(otherAssoc),
+			"kinds", kinds,
+		)
+	}
+
+	// postL0Hook is called by buildPyramid immediately after writing IFD 0 (L0)
+	// and before writing L1+. This is where we inject the thumbnail so it lands
+	// at IFD position 1 — the slot opentile-go's classifier uses for thumbnail.
+	postL0Hook := func() error {
+		if thumbnail == nil {
+			return nil
+		}
+		return writeOneAssociated(w, thumbnail)
+	}
+
 	start := time.Now()
-	if err := buildPyramid(ctx, src, w, dsFactor, dsQuality, dsJobs); err != nil {
+	if err := buildPyramid(ctx, src, w, dsFactor, dsQuality, dsJobs, postL0Hook); err != nil {
 		return fmt.Errorf("build pyramid: %w", err)
 	}
 
-	// Pass through associated images verbatim.
-	if err := writeAssociatedPassthrough(src, w); err != nil {
-		return fmt.Errorf("write associated: %w", err)
+	// Write label then macro at the end — they must be the last 2 trailing pages
+	// so opentile-go's classifyPages picks them up correctly.
+	if label != nil {
+		if err := writeOneAssociated(w, label); err != nil {
+			return fmt.Errorf("write associated label: %w", err)
+		}
+	}
+	if macro != nil {
+		if err := writeOneAssociated(w, macro); err != nil {
+			return fmt.Errorf("write associated macro/overview: %w", err)
+		}
 	}
 
 	if err := w.Close(); err != nil {
@@ -294,7 +343,11 @@ func countTilesForLevel(w, h int) int {
 // 1/factor fast-scale decode), then iteratively encodes + writes each output
 // pyramid level (256x256 tiled JPEG). L1+ rasters are computed in-memory
 // from the previous level via 2x2 area-average.
-func buildPyramid(ctx context.Context, src opentile.Tiler, w *wsiwriter.Writer, factor, quality, workers int) error {
+//
+// postL0Hook, if non-nil, is called after writing L0 and before writing L1.
+// The caller uses this to inject the thumbnail IFD between L0 and L1 to match
+// Aperio's quirky IFD ordering convention.
+func buildPyramid(ctx context.Context, src opentile.Tiler, w *wsiwriter.Writer, factor, quality, workers int, postL0Hook func() error) error {
 	srcLevels := src.Levels()
 	srcL0 := srcLevels[0]
 
@@ -380,6 +433,16 @@ func buildPyramid(ctx context.Context, src opentile.Tiler, w *wsiwriter.Writer, 
 				"tiles", tiles,
 				"elapsed", time.Since(lvlStart).Round(time.Millisecond).String(),
 			)
+		}
+
+		// Aperio IFD ordering: thumbnail goes between L0 and L1.
+		if outLvl == 0 && postL0Hook != nil {
+			if err := postL0Hook(); err != nil {
+				if progress != nil {
+					progress.Wait()
+				}
+				return fmt.Errorf("post-L0 hook: %w", err)
+			}
 		}
 
 		if outLvl < nLevels-1 {
@@ -673,42 +736,40 @@ func extractTileFromRaster(raster []byte, rasterW, rasterH, tx, ty int) ([]byte,
 	return tile, nil
 }
 
-// writeAssociatedPassthrough writes each source associated image verbatim into
-// the output as a single-strip IFD. NewSubfileType is set per the SVS reader
-// classifier convention: thumbnail=0, label=1 (reduced bit), overview/macro=9
-// (reduced + macro bit). Compression tag mirrors the source.
-func writeAssociatedPassthrough(src opentile.Tiler, w *wsiwriter.Writer) error {
-	for _, a := range src.Associated() {
-		bs, err := a.Bytes()
-		if err != nil {
-			return fmt.Errorf("associated %q bytes: %w", a.Kind(), err)
-		}
-		var subfileType uint32
-		switch a.Kind() {
-		case "thumbnail":
-			subfileType = 0
-		case "label":
-			subfileType = 1
-		case "overview", "macro":
-			subfileType = 9
-		default:
-			subfileType = 0
-		}
-		comp, photo, err := mapAssociatedCompression(a.Compression())
-		if err != nil {
-			return fmt.Errorf("associated %q compression: %w", a.Kind(), err)
-		}
-		if err := w.AddAssociated(wsiwriter.AssociatedSpec{
-			Kind:                      a.Kind(),
-			Compressed:                bs,
-			Width:                     uint32(a.Size().W),
-			Height:                    uint32(a.Size().H),
-			Compression:               comp,
-			PhotometricInterpretation: photo,
-			NewSubfileType:            subfileType,
-		}); err != nil {
-			return fmt.Errorf("AddAssociated %q: %w", a.Kind(), err)
-		}
+// writeOneAssociated writes a single associated image verbatim into the output
+// as a single-strip IFD. NewSubfileType is set per the SVS reader classifier
+// convention: thumbnail=0, label=1 (reduced bit), overview/macro=9 (reduced +
+// macro bit). Compression tag mirrors the source.
+func writeOneAssociated(w *wsiwriter.Writer, a opentile.AssociatedImage) error {
+	bs, err := a.Bytes()
+	if err != nil {
+		return fmt.Errorf("associated %q bytes: %w", a.Kind(), err)
+	}
+	var subfileType uint32
+	switch a.Kind() {
+	case "thumbnail":
+		subfileType = 0
+	case "label":
+		subfileType = 1
+	case "overview", "macro":
+		subfileType = 9
+	default:
+		subfileType = 0
+	}
+	comp, photo, err := mapAssociatedCompression(a.Compression())
+	if err != nil {
+		return fmt.Errorf("associated %q compression: %w", a.Kind(), err)
+	}
+	if err := w.AddAssociated(wsiwriter.AssociatedSpec{
+		Kind:                      a.Kind(),
+		Compressed:                bs,
+		Width:                     uint32(a.Size().W),
+		Height:                    uint32(a.Size().H),
+		Compression:               comp,
+		PhotometricInterpretation: photo,
+		NewSubfileType:            subfileType,
+	}); err != nil {
+		return fmt.Errorf("AddAssociated %q: %w", a.Kind(), err)
 	}
 	return nil
 }
