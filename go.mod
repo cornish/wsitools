@@ -6,7 +6,7 @@ require (
 	github.com/VividCortex/ewma v1.2.0 // indirect
 	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/cornish/opentile-go v0.12.0 // indirect
+	github.com/cornish/opentile-go v0.14.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-runewidth v0.0.20 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
