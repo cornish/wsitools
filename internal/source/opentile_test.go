@@ -88,3 +88,33 @@ func TestMapOpentileCompression_NovelCodecs(t *testing.T) {
 		}
 	}
 }
+
+// TestLevel_TileInto_RoundTrip opens a known SVS fixture and verifies
+// that TileInto fills a buffer with the same bytes the underlying
+// opentile.Level returns.
+func TestLevel_TileInto_RoundTrip(t *testing.T) {
+	testDir := os.Getenv("WSI_TOOLS_TESTDIR")
+	if testDir == "" {
+		t.Skip("WSI_TOOLS_TESTDIR not set")
+	}
+	path := filepath.Join(testDir, "svs", "CMU-1-Small-Region.svs")
+	src, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer src.Close()
+
+	lvl := src.Levels()[0]
+	max := lvl.TileMaxSize()
+	if max <= 0 {
+		t.Fatalf("TileMaxSize() = %d, want > 0", max)
+	}
+	buf := make([]byte, max)
+	n, err := lvl.TileInto(0, 0, buf)
+	if err != nil {
+		t.Fatalf("TileInto: %v", err)
+	}
+	if n <= 0 || n > max {
+		t.Fatalf("TileInto returned n=%d (max=%d)", n, max)
+	}
+}

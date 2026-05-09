@@ -43,7 +43,17 @@ type Level interface {
 	TileSize() image.Point // tile dimensions; preserved verbatim on output
 	Grid() image.Point     // tilesX × tilesY
 	Compression() Compression
-	Tile(x, y int) ([]byte, error) // raw compressed bytes from opentile-go
+
+	// TileMaxSize returns an upper bound on any tile's compressed-byte
+	// length on this level — sized for sync.Pool buffers.
+	TileMaxSize() int
+
+	// TileInto writes the raw compressed tile bytes at (x, y) into dst
+	// and returns the number of bytes written. dst must have len >=
+	// TileMaxSize(); shorter buffers return io.ErrShortBuffer. The
+	// returned slice (dst[:n]) is the canonical byte form for the
+	// transcode/downsample decoder pipeline.
+	TileInto(x, y int, dst []byte) (int, error)
 }
 
 // AssociatedImage is one of label / macro / thumbnail / overview /

@@ -264,13 +264,20 @@ func transcodeLevel(ctx context.Context, lvl source.Level, w *wsiwriter.Writer, 
 	return pipeline.Run(ctx, pipeline.Config{
 		Workers: workers,
 		Source: func(ctx context.Context, emit func(pipeline.Tile) error) error {
+			maxTileBytes := lvl.TileMaxSize()
 			for ty := 0; ty < grid.Y; ty++ {
 				for tx := 0; tx < grid.X; tx++ {
-					b, err := lvl.Tile(tx, ty)
+					buf := make([]byte, maxTileBytes)
+					n, err := lvl.TileInto(tx, ty, buf)
 					if err != nil {
 						return err
 					}
-					if err := emit(pipeline.Tile{Level: lvl.Index(), X: uint32(tx), Y: uint32(ty), Bytes: b}); err != nil {
+					if err := emit(pipeline.Tile{
+						Level: lvl.Index(),
+						X:     uint32(tx),
+						Y:     uint32(ty),
+						Bytes: buf[:n],
+					}); err != nil {
 						return err
 					}
 				}

@@ -116,7 +116,11 @@ func (l *opentileLevel) Grid() image.Point {
 	g := l.lvl.Grid()
 	return image.Point{X: g.W, Y: g.H}
 }
-func (l *opentileLevel) Tile(x, y int) ([]byte, error) { return l.lvl.Tile(x, y) }
+func (l *opentileLevel) TileMaxSize() int { return l.lvl.TileMaxSize() }
+
+func (l *opentileLevel) TileInto(x, y int, dst []byte) (int, error) {
+	return l.lvl.TileInto(x, y, dst)
+}
 
 func (l *opentileLevel) Compression() Compression {
 	return mapOpentileCompression(l.lvl.Compression())

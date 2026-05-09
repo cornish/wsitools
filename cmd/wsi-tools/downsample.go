@@ -511,6 +511,8 @@ func materializeOutputL0(ctx context.Context, srcL0 opentile.Level, outL0 []byte
 	jpegDec := decoder.NewJPEG()
 	jp2kDec := decoder.NewJPEG2000()
 
+	tileBuf := make([]byte, srcL0.TileMaxSize())
+
 	for ty := 0; ty < srcGrid.H; ty++ {
 		for tx := 0; tx < srcGrid.W; tx++ {
 			select {
@@ -518,10 +520,11 @@ func materializeOutputL0(ctx context.Context, srcL0 opentile.Level, outL0 []byte
 				return ctx.Err()
 			default:
 			}
-			compressed, err := srcL0.Tile(tx, ty)
+			n, err := srcL0.TileInto(tx, ty, tileBuf)
 			if err != nil {
 				return fmt.Errorf("read source tile (%d,%d): %w", tx, ty, err)
 			}
+			compressed := tileBuf[:n]
 			// Compute the image-space destination rect for this source tile.
 			// The source tile covers [sx0, sx1) × [sy0, sy1) in source-pixel
 			// space, clamped at the image bounds. The corresponding output
