@@ -129,7 +129,7 @@ func runTranscode(cmd *cobra.Command, args []string) error {
 	// Build writer options.
 	wOpts := []wsiwriter.Option{
 		wsiwriter.WithBigTIFF(bigtiff),
-		wsiwriter.WithToolsVersion("0.2.0-dev"),
+		wsiwriter.WithToolsVersion(Version),
 		wsiwriter.WithSourceFormat(src.Format()),
 	}
 	md := src.Metadata()
@@ -355,7 +355,7 @@ func newSubfileTypeFor(container, kind string) uint32 {
 
 func buildProvenanceDesc(src source.Source, codecName string, md source.Metadata) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "wsi-tools/0.2.0-dev transcode source=%s codec=%s", src.Format(), codecName)
+	fmt.Fprintf(&b, "wsi-tools/%s transcode source=%s codec=%s", Version, src.Format(), codecName)
 	if md.MPP > 0 {
 		fmt.Fprintf(&b, " mpp=%v", md.MPP)
 	}
