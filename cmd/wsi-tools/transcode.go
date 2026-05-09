@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	opentile "github.com/cornish/opentile-go"
@@ -261,23 +262,34 @@ func transcodeLevel(ctx context.Context, lvl source.Level, w *wsiwriter.Writer, 
 	tileBytes := lvl.TileSize().X * lvl.TileSize().Y * 3
 	tileW := lvl.TileSize().X
 	tileH := lvl.TileSize().Y
+	maxTileBytes := lvl.TileMaxSize()
+	pool := &sync.Pool{
+		New: func() any {
+			b := make([]byte, maxTileBytes)
+			return &b
+		},
+	}
+
 	return pipeline.Run(ctx, pipeline.Config{
 		Workers: workers,
 		Source: func(ctx context.Context, emit func(pipeline.Tile) error) error {
-			maxTileBytes := lvl.TileMaxSize()
 			for ty := 0; ty < grid.Y; ty++ {
 				for tx := 0; tx < grid.X; tx++ {
-					buf := make([]byte, maxTileBytes)
-					n, err := lvl.TileInto(tx, ty, buf)
+					bufp := pool.Get().(*[]byte)
+					n, err := lvl.TileInto(tx, ty, *bufp)
 					if err != nil {
+						pool.Put(bufp)
 						return err
 					}
-					if err := emit(pipeline.Tile{
-						Level: lvl.Index(),
-						X:     uint32(tx),
-						Y:     uint32(ty),
-						Bytes: buf[:n],
-					}); err != nil {
+					t := pipeline.Tile{
+						Level:   lvl.Index(),
+						X:       uint32(tx),
+						Y:       uint32(ty),
+						Bytes:   (*bufp)[:n],
+						Release: func() { pool.Put(bufp) },
+					}
+					if err := emit(t); err != nil {
+						pool.Put(bufp)
 						return err
 					}
 				}
@@ -287,6 +299,10 @@ func transcodeLevel(ctx context.Context, lvl source.Level, w *wsiwriter.Writer, 
 		Process: func(t pipeline.Tile) (pipeline.Tile, error) {
 			rgb := make([]byte, tileBytes)
 			rgbOut, err := dec.DecodeTile(t.Bytes, rgb, 1, 1)
+			if t.Release != nil {
+				t.Release()
+				t.Release = nil
+			}
 			if err != nil {
 				return pipeline.Tile{}, err
 			}

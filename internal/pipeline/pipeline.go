@@ -12,6 +12,13 @@ type Tile struct {
 	Level int
 	X, Y  uint32
 	Bytes []byte
+
+	// Release, if non-nil, is invoked by the consumer (typically inside
+	// ProcessFn between decode and encode) to return Bytes' underlying
+	// buffer to its source pool. The pipeline itself never invokes
+	// Release; ownership and lifetime are entirely caller-managed.
+	// Nil is safe.
+	Release func()
 }
 
 type SourceFn func(ctx context.Context, emit func(Tile) error) error

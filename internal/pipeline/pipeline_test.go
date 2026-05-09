@@ -65,3 +65,45 @@ func TestPipelineErrorCancelsRun(t *testing.T) {
 		t.Errorf("err: got %v, want %v", err, wantErr)
 	}
 }
+
+// TestTile_ReleaseInvokedByProcess proves the canonical lifecycle: the
+// producer attaches Release; Process invokes it; the pipeline itself
+// never invokes Release (it is opaque to the field). After the run,
+// the call count equals the number of emitted tiles.
+func TestTile_ReleaseInvokedByProcess(t *testing.T) {
+	const N = 17
+	var released atomic.Int64
+
+	cfg := Config{
+		Workers: 4,
+		Source: func(ctx context.Context, emit func(Tile) error) error {
+			for i := 0; i < N; i++ {
+				if err := emit(Tile{
+					Level:   0,
+					X:       uint32(i),
+					Y:       0,
+					Bytes:   []byte{byte(i)},
+					Release: func() { released.Add(1) },
+				}); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Process: func(t Tile) (Tile, error) {
+			if t.Release != nil {
+				t.Release()
+				t.Release = nil
+			}
+			t.Bytes = []byte{0xFF}
+			return t, nil
+		},
+		Sink: func(t Tile) error { return nil },
+	}
+	if err := Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := released.Load(); got != N {
+		t.Errorf("Release invoked %d times, want %d", got, N)
+	}
+}
