@@ -4,6 +4,25 @@ All notable changes to wsi-tools will be documented here. The format is loosely 
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-08
+
+Patch release. Fixes the v0.3.0 Windows build: `internal/codec/all`
+imported the htj2k codec unconditionally, but Windows CI builds with
+`-tags nohtj2k` (OpenJPH isn't packaged for msys2) and the dangling
+import broke compilation. Same fix unblocks any `-tags no<codec>`
+slim binary on any platform. macOS and Linux runtime behaviour is
+unchanged.
+
+### Fixed
+
+- **`internal/codec/all` build tags** — split into one file per
+  optional codec, each behind its matching `!no<name>` constraint
+  (`!noavif`, `!nowebp`, `!nojxl`, `!nohtj2k`). Always-on `jpeg`
+  stays in `all.go`. Verified building under default tags AND
+  `-tags 'nohtj2k noavif nowebp nojxl'` (every optional codec
+  disabled). `wsi-tools doctor` correctly omits any disabled codec
+  from the registered-codecs list.
+
 ## [0.3.0] — 2026-05-08
 
 opentile-go v0.14 alignment. Bumps the upstream dep from v0.12 to
