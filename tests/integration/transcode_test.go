@@ -13,24 +13,18 @@ import (
 	_ "github.com/cornish/opentile-go/formats/all"
 )
 
-// v02Codecs and the substrings expected in `tiffinfo`'s Compression Scheme
-// line. tiffinfo recognises some codecs by name (e.g. "WEBP" for tag 50001)
-// and prints unrecognised codes as their numeric value. We accept either form
-// per codec to be portable across libtiff versions.
-//
-// These four codec wrappers produce TIFFs that opentile-go v0.12's generic-TIFF
-// reader does NOT yet recognise (it accepts JPEG / JP2K / LZW / Deflate / None
-// compression values only). Until a future opentile-go release adds decoders
-// for our private codes, the per-codec test validates structurally via
-// tiffinfo rather than round-tripping through opentile-go.
+// v02Codecs lists the 4 novel codecs added in v0.2 that produce generic-TIFF
+// outputs. opentile-go v0.14 recognises all four compression tags, so we can
+// validate via a proper opentile-go round-trip instead of shelling out to
+// tiffinfo.
 var v02Codecs = []struct {
-	name           string
-	expectAnyOf    []string // any of these substrings indicates the right Compression Scheme
+	name            string
+	wantCompression opentile.Compression
 }{
-	{"jpegxl", []string{"50002", "JPEG-XL", "JXL"}},        // Adobe-allocated draft
-	{"avif", []string{"60001"}},                            // wsi-tools-private (no libtiff name)
-	{"webp", []string{"WEBP", "50001"}},                    // Adobe-allocated; libtiff prints "WEBP"
-	{"htj2k", []string{"60003"}},                           // wsi-tools-private
+	{"jpegxl", opentile.CompressionJPEGXL},
+	{"avif", opentile.CompressionAVIF},
+	{"webp", opentile.CompressionWebP},
+	{"htj2k", opentile.CompressionHTJ2K},
 }
 
 func TestTranscode_PerCodec_CMU1Small(t *testing.T) {
@@ -39,10 +33,21 @@ func TestTranscode_PerCodec_CMU1Small(t *testing.T) {
 	if _, err := os.Stat(src); err != nil {
 		t.Skipf("fixture missing: %v", err)
 	}
-	if _, err := exec.LookPath("tiffinfo"); err != nil {
-		t.Skip("tiffinfo not in PATH (brew install libtiff); skipping structural validation")
-	}
 	bin := buildOnce(t)
+
+	// Read source properties once so per-codec assertions can compare
+	// against actual source values rather than hardcoded constants.
+	srcTlr, err := opentile.OpenFile(src)
+	if err != nil {
+		t.Fatalf("opentile.OpenFile(src): %v", err)
+	}
+	srcLevels := srcTlr.Levels()
+	if len(srcLevels) == 0 {
+		t.Fatalf("source has no levels: %s", src)
+	}
+	srcTileSize := srcLevels[0].TileSize()
+	srcMag := srcTlr.Metadata().Magnification
+	srcTlr.Close()
 
 	for _, c := range v02Codecs {
 		c := c
@@ -52,47 +57,7 @@ func TestTranscode_PerCodec_CMU1Small(t *testing.T) {
 			if b, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("transcode --codec %s: %v\n%s", c.name, err, b)
 			}
-
-			// Structural validation via tiffinfo. opentile-go v0.12's
-			// generic-TIFF reader only recognises JPEG/JP2K/LZW/Deflate/None
-			// compression values, so it would reject our private codes —
-			// even though the file is structurally valid TIFF that
-			// wsi-tools-aware viewers can decode.
-			//
-			// tiffinfo may exit non-zero with "WEBP compression support is
-			// not configured" (or similar) for codecs libtiff knows by name
-			// but wasn't built to decode. The structural directory dump
-			// still goes to stdout, so we ignore the exit code and only
-			// verify the captured output looks right.
-			info, _ := exec.Command("tiffinfo", out).CombinedOutput()
-			got := string(info)
-			if len(got) == 0 {
-				t.Fatalf("tiffinfo produced no output for codec %s", c.name)
-			}
-			// Must contain at least 2 TIFF Directories (pyramid L0 +
-			// associated images at minimum).
-			if strings.Count(got, "TIFF Directory") < 2 {
-				t.Errorf("expected ≥2 TIFF Directories in tiffinfo output; got:\n%s", got)
-			}
-			// Compression Scheme line on the pyramid IFD should mention the
-			// expected compression — accept any of the per-codec markers
-			// (libtiff prints recognised codecs by name, unrecognised by
-			// numeric tag value).
-			matched := false
-			for _, marker := range c.expectAnyOf {
-				if strings.Contains(got, marker) {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				t.Errorf("expected one of %v in tiffinfo output for codec %s; got:\n%s",
-					c.expectAnyOf, c.name, got)
-			}
-			// WSIImageType tag (65080) should appear at least once.
-			if !strings.Contains(got, "65080") {
-				t.Errorf("expected WSIImageType tag (65080) in tiffinfo output; got:\n%s", got)
-			}
+			validateNovelCodecOutput(t, out, c.wantCompression, srcTileSize, srcMag)
 		})
 	}
 
@@ -172,4 +137,41 @@ func TestTranscode_BigTIFFFixture(t *testing.T) {
 		t.Fatalf("transcode of 4.8 GB BigTIFF failed: %v\n%s", err, b)
 	}
 	// If we got here without OOM, streaming works.
+}
+
+// validateNovelCodecOutput re-opens a transcoded output via opentile-go
+// (v0.14+) and asserts compression-tag recognition + ImageDescription
+// metadata round-trip. The 4 novel codecs (WebP, JPEGXL, AVIF, HTJ2K)
+// produce generic-TIFF outputs that v0.14 can parse but does not
+// decode — assertions stay at the metadata layer, not the tile-pixel
+// layer.
+func validateNovelCodecOutput(t *testing.T, outPath string, wantCompression opentile.Compression, wantTileSize opentile.Size, wantMag float64) {
+	t.Helper()
+	tlr, err := opentile.OpenFile(outPath)
+	if err != nil {
+		t.Fatalf("opentile.OpenFile(%s): %v", outPath, err)
+	}
+	defer tlr.Close()
+
+	if got := tlr.Format(); got != opentile.FormatGenericTIFF {
+		t.Errorf("Format() = %v, want %v", got, opentile.FormatGenericTIFF)
+	}
+	levels := tlr.Levels()
+	if len(levels) == 0 {
+		t.Fatalf("no levels in %s", outPath)
+	}
+	if got := levels[0].Compression(); got != wantCompression {
+		t.Errorf("L0 Compression() = %v, want %v", got, wantCompression)
+	}
+	if got := levels[0].TileSize(); got != wantTileSize {
+		t.Errorf("L0 TileSize() = %v, want %v", got, wantTileSize)
+	}
+
+	md := tlr.Metadata()
+	if md.Magnification != wantMag {
+		t.Errorf("Metadata.Magnification = %v, want %v", md.Magnification, wantMag)
+	}
+	if md.AcquisitionDateTime.IsZero() {
+		t.Errorf("Metadata.AcquisitionDateTime is zero — wsi-tools ImageDescription parser failed?")
+	}
 }
