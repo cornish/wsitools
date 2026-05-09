@@ -4,6 +4,52 @@ All notable changes to wsi-tools will be documented here. The format is loosely 
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-08
+
+opentile-go v0.14 alignment. Bumps the upstream dep from v0.12 to
+v0.14, claims the new capabilities that bump unlocks (novel-codec
+recognition + wsi-tools ImageDescription parsing on re-read), and
+migrates the streaming transcode hot path to opentile-go's
+allocation-free `TileInto` API with a per-level `sync.Pool` of
+tile-sized buffers.
+
+### Added
+
+- **`internal/source.Compression`** gains three new values —
+  `CompressionWebP`, `CompressionJPEGXL`, `CompressionHTJ2K` —
+  matching opentile-go v0.14's new enum values. AVIF was already
+  mapped via the v0.8 `CompressionAVIF` constant.
+- **`pipeline.Tile.Release func()`** — optional buffer-pool callback,
+  invoked by the consumer between decode and encode. Nil-safe; the
+  pipeline package itself stays opaque to the field.
+- **opentile-go round-trip integration test for the 4 novel codecs**
+  — replaces the prior `tiffinfo` shell-out with assertions on
+  `Format()`, `Compression()`, `TileSize()`, and
+  `Metadata.AcquisitionDateTime`.
+
+### Changed
+
+- **opentile-go bumped from v0.12 → v0.14.** Both v0.13 (additive
+  splice-prefix family on `Level`) and v0.14 (additive Compression
+  values + wsi-tools ImageDescription parser) are non-breaking.
+- **`internal/source.Level` interface** — `Tile()` removed; replaced
+  by `TileMaxSize()` and `TileInto(x, y int, dst []byte) (int, error)`.
+  `internal/` is private API; no external callers affected. The
+  transcode producer now uses a per-level `sync.Pool`; the downsample
+  source loop hoists a single tile-sized buffer above the loop.
+- **`cmd/wsi-tools/version.go::Version`** bumped to `0.3.0-dev`. The
+  literal `"wsi-tools/0.2.0-dev"` strings in the transcode provenance
+  builder and the `WithToolsVersion` writer option are now derived
+  from `Version`, not hardcoded.
+
+### Not adopted (intentional)
+
+- `opentile.Level.TilePrefix` / `TileBodyInto` / `SpliceJPEGTile` are
+  bandwidth-deduplication helpers for client-server byte-passthrough
+  scenarios. wsi-tools' transcode pipeline fully decodes every tile,
+  so the splice family offers no benefit. The decision is reversible
+  if a future feature (e.g., a streaming HTTP tile server) needs it.
+
 ## [0.2.0] — 2026-05-08
 
 The transcode milestone. Adds `wsi-tools transcode` with 4 new codec wrappers, expands source format support to 6 sane TIFF dialects, ships a streaming pyramid pipeline that lifts the v0.1 memory ceiling, and bundles a fix for v0.1 downsample's associated-image IFD-ordering bug.
@@ -47,7 +93,7 @@ The transcode milestone. Adds `wsi-tools transcode` with 4 new codec wrappers, e
 - **Streaming retrofit for `downsample`**: v0.2.0 ships streaming for transcode only; downsample still materialises the full L0 raster. v0.2.x.
 - **Leica SCN source support**: SCN's multi-image + multi-channel structure requires per-`Image` and per-channel pipeline plumbing not in v0.2.0 scope.
 - **Visual-fidelity tests via mini decoders** (read raw tile bytes from opentile-go, decode via the matching codec library): v0.2.x follow-up to validate JPEG-XL / AVIF / WebP / HTJ2K outputs without depending on opentile-go to grow decoders for those compression IDs.
-- **opentile-go decoders for JXL / AVIF / WebP / HTJ2K compression tags**: opentile-go v0.12's generic-TIFF reader currently accepts only JPEG / JP2K / LZW / Deflate / None compression values. Files written with our private codes (50001/50002/60001/60003) are structurally valid TIFF but require either an opentile-go release that adds these decoders or a viewer with its own codec libraries.
+- ~~**opentile-go decoders for JXL / AVIF / WebP / HTJ2K compression tags**~~: **landed in v0.3.0** via opentile-go v0.14's new `Compression` enum values + generic-TIFF tag mappings. opentile-go does not decode the tile bytes (byte-passthrough contract — consumers bring their own codec libraries) but recognises the compression tags and parses the wsi-tools `ImageDescription`.
 
 ## [0.1.0] — 2026-05-07
 
