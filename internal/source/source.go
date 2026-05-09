@@ -67,6 +67,9 @@ const (
 	CompressionNone
 	CompressionAVIF
 	CompressionIrisProprietary
+	CompressionWebP
+	CompressionJPEGXL
+	CompressionHTJ2K
 )
 
 func (c Compression) String() string {
@@ -85,6 +88,12 @@ func (c Compression) String() string {
 		return "avif"
 	case CompressionIrisProprietary:
 		return "iris-proprietary"
+	case CompressionWebP:
+		return "webp"
+	case CompressionJPEGXL:
+		return "jpegxl"
+	case CompressionHTJ2K:
+		return "htj2k"
 	}
 	return "unknown"
 }

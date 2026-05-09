@@ -154,6 +154,12 @@ func mapOpentileCompression(c opentile.Compression) Compression {
 		return CompressionAVIF
 	case opentile.CompressionIRIS:
 		return CompressionIrisProprietary
+	case opentile.CompressionWebP:
+		return CompressionWebP
+	case opentile.CompressionJPEGXL:
+		return CompressionJPEGXL
+	case opentile.CompressionHTJ2K:
+		return CompressionHTJ2K
 	}
 	return CompressionUnknown
 }

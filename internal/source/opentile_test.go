@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	opentile "github.com/cornish/opentile-go"
 )
 
 func testdir(t *testing.T) string {
@@ -68,5 +70,21 @@ func TestOpen_NotATIFF(t *testing.T) {
 	_, err := Open(path)
 	if err == nil {
 		t.Error("expected error opening non-TIFF garbage")
+	}
+}
+
+func TestMapOpentileCompression_NovelCodecs(t *testing.T) {
+	cases := []struct {
+		in   opentile.Compression
+		want Compression
+	}{
+		{opentile.CompressionWebP, CompressionWebP},
+		{opentile.CompressionJPEGXL, CompressionJPEGXL},
+		{opentile.CompressionHTJ2K, CompressionHTJ2K},
+	}
+	for _, tc := range cases {
+		if got := mapOpentileCompression(tc.in); got != tc.want {
+			t.Errorf("mapOpentileCompression(%v) = %v, want %v", tc.in, got, tc.want)
+		}
 	}
 }
