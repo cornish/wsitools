@@ -1,9 +1,9 @@
 // Package wsiwriter writes WSI files in TIFF / BigTIFF / SVS shapes.
 package wsiwriter
 
-// TIFF Compression tag (TIFF tag 259) values used by wsi-tools. Standard values
+// TIFF Compression tag (TIFF tag 259) values used by wsitools. Standard values
 // have ISO / Adobe / community allocations. Private values (≥ 32768) are
-// wsi-tools-assigned for codecs without a recognized TIFF tag.
+// wsitools-assigned for codecs without a recognized TIFF tag.
 //
 // The full canonical mapping lives at docs/compression-tags.md.
 const (
@@ -17,8 +17,8 @@ const (
 	CompressionWebP     uint16 = 50001 // Adobe-allocated
 	CompressionJPEGXL   uint16 = 50002 // Adobe-allocated (draft)
 
-	// wsi-tools-private values (≥ 32768). Documented in docs/compression-tags.md.
-	// These will only be readable by wsi-tools-aware viewers.
+	// wsitools-private values (≥ 32768). Documented in docs/compression-tags.md.
+	// These will only be readable by wsitools-aware viewers.
 	CompressionAVIF   uint16 = 60001
 	CompressionHEIF   uint16 = 60002
 	CompressionHTJ2K  uint16 = 60003

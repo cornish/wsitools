@@ -16,10 +16,10 @@ var dumpIFDsCmd = &cobra.Command{
 	Use:   "dump-ifds <file>",
 	Short: "Format-aware per-IFD layout dump (slim tiffinfo analog)",
 	Long: `Dump every IFD in a TIFF-shaped WSI file in file order, annotated
-with wsi-tools' format-aware classification (pyramid L0/L1/.../label/
+with wsitools' format-aware classification (pyramid L0/L1/.../label/
 macro/thumbnail/overview/probability/map). For each IFD: dimensions,
 tile size (if tiled), compression, and SubfileType. Plus a separate
-WSI-tags section listing wsi-tools' private tags 65080–65084 if present.
+WSI-tags section listing wsitools' private tags 65080–65084 if present.
 
 Not a full tiffinfo replacement — does not dump every TIFF tag. A future
 --raw flag will expand this.

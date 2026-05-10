@@ -50,16 +50,16 @@ ErrUnsupportedFormat.
 Examples:
 
   # SVS to JPEG-XL (generic TIFF output, since JPEG-XL doesn't fit SVS).
-  wsi-tools transcode --codec jpegxl -o slide-jxl.tiff slide.svs
+  wsitools transcode --codec jpegxl -o slide-jxl.tiff slide.svs
 
   # SVS re-encoded as JPEG at a different quality (still SVS-shaped).
-  wsi-tools transcode --codec jpeg --quality 75 -o slide-q75.svs slide.svs
+  wsitools transcode --codec jpeg --quality 75 -o slide-q75.svs slide.svs
 
   # AVIF with a faster encoder preset.
-  wsi-tools transcode --codec avif --codec-opt avif.speed=8 -o out.tiff in.svs
+  wsitools transcode --codec avif --codec-opt avif.speed=8 -o out.tiff in.svs
 
   # Lossless WebP for archival.
-  wsi-tools transcode --codec webp --codec-opt webp.lossless=true -o out.tiff in.svs`,
+  wsitools transcode --codec webp --codec-opt webp.lossless=true -o out.tiff in.svs`,
 	Args: cobra.ExactArgs(1),
 	RunE: runTranscode,
 }
@@ -152,7 +152,7 @@ func runTranscode(cmd *cobra.Command, args []string) error {
 			wOpts = append(wOpts, wsiwriter.WithImageDescription(desc))
 		}
 	} else {
-		// Generic TIFF: assemble a wsi-tools provenance string.
+		// Generic TIFF: assemble a wsitools provenance string.
 		wOpts = append(wOpts, wsiwriter.WithImageDescription(buildProvenanceDesc(src, tcCodec, md)))
 	}
 

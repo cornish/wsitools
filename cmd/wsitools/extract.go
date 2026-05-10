@@ -30,7 +30,7 @@ var extractCmd = &cobra.Command{
 	Long: `Save an associated image embedded in a WSI as a standalone PNG or JPEG file.
 
 Available associated-image kinds depend on the source format and the slide:
-typically label, macro, thumbnail, overview. Run 'wsi-tools info <file>'
+typically label, macro, thumbnail, overview. Run 'wsitools info <file>'
 to list which kinds the slide carries.
 
 For --format jpeg, when the source associated image is already JPEG-compressed,

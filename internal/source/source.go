@@ -1,4 +1,4 @@
-// Package source is a thin adapter between the wsi-tools CLI and opentile-go.
+// Package source is a thin adapter between the wsitools CLI and opentile-go.
 // It enforces the v0.2 sanity gate (rejecting NDPI, OME-OneFrame, and Leica
 // SCN at the boundary) and exposes a unified streaming-friendly tile API.
 // Whatever opentile-go's various format-specific quirks are, the CLI consumes

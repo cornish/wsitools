@@ -1,5 +1,5 @@
 // Package cliout holds shared text/JSON dual-rendering helpers used by the
-// wsi-tools read-side subcommands (info, dump-ifds, extract, hash).
+// wsitools read-side subcommands (info, dump-ifds, extract, hash).
 package cliout
 
 import (

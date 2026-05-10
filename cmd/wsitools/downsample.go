@@ -74,10 +74,10 @@ v0.1 supports SVS sources only.
 Examples:
 
   # 40x → 20x SVS (defaults)
-  wsi-tools downsample -o slide-20x.svs slide-40x.svs
+  wsitools downsample -o slide-20x.svs slide-40x.svs
 
   # 40x → 10x at higher quality, 8 workers
-  wsi-tools downsample --factor 4 --quality 95 --jobs 8 -o out.svs in.svs`,
+  wsitools downsample --factor 4 --quality 95 --jobs 8 -o out.svs in.svs`,
 	Args:          cobra.ExactArgs(1),
 	RunE:          runDownsample,
 	SilenceUsage:  true,

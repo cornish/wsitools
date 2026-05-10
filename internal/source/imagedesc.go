@@ -11,7 +11,7 @@ import (
 // from IFD 0 of a TIFF / BigTIFF file. opentile-go's Tiler does not expose the
 // raw description verbatim; this helper is a minimal one-shot parser used by
 // the downsample CLI (to mutate AppMag/MPP) and the transcode CLI (to either
-// passthrough or build a wsi-tools provenance string).
+// passthrough or build a wsitools provenance string).
 //
 // Returns ("", error) for non-TIFF inputs or files missing tag 270 — the
 // caller decides whether to surface or silence the error. For non-TIFF

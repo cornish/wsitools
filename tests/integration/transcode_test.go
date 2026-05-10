@@ -172,6 +172,6 @@ func validateNovelCodecOutput(t *testing.T, outPath string, wantCompression open
 		t.Errorf("Metadata.Magnification = %v, want %v", md.Magnification, wantMag)
 	}
 	if md.AcquisitionDateTime.IsZero() {
-		t.Errorf("Metadata.AcquisitionDateTime is zero — wsi-tools ImageDescription parser failed?")
+		t.Errorf("Metadata.AcquisitionDateTime is zero — wsitools ImageDescription parser failed?")
 	}
 }

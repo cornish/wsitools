@@ -11,9 +11,9 @@ const Version = "0.5.0-dev"
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
-	Short: "Print wsi-tools version + build info",
+	Short: "Print wsitools version + build info",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Printf("wsi-tools %s\n", Version)
+		fmt.Printf("wsitools %s\n", Version)
 		fmt.Printf("go %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 		return nil
 	},

@@ -12,7 +12,7 @@ var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Report installed codec libraries + version info",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("wsi-tools", Version, "— codec / library health check.")
+		fmt.Println("wsitools", Version, "— codec / library health check.")
 		fmt.Println()
 		fmt.Println("Codecs:")
 		names := codec.List()

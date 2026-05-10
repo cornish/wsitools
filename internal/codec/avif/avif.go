@@ -2,7 +2,7 @@
 
 // Package avif provides a libavif-backed AVIF encoder, registered with
 // internal/codec under the name "avif". One AVIF still per tile; output
-// uses TIFF Compression=60001 (wsi-tools-private — no standardised TIFF
+// uses TIFF Compression=60001 (wsitools-private — no standardised TIFF
 // tag for AVIF as of 2026-05).
 package avif
 

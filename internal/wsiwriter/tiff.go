@@ -28,7 +28,7 @@ type Writer struct {
 	dateTime    time.Time
 	hasDateTime bool
 
-	// wsi-tools private metadata tags emitted on L0 when set.
+	// wsitools private metadata tags emitted on L0 when set.
 	sourceFormat string // → TagWSISourceFormat
 	toolsVersion string // → TagWSIToolsVersion
 
@@ -51,7 +51,7 @@ type writerConfig struct {
 	dateTime    time.Time
 	hasDateTime bool
 
-	// wsi-tools private metadata tags emitted on L0 when set.
+	// wsitools private metadata tags emitted on L0 when set.
 	sourceFormat string // → TagWSISourceFormat
 	toolsVersion string // → TagWSIToolsVersion
 }
@@ -83,13 +83,13 @@ func WithDateTime(t time.Time) Option {
 	return func(c *writerConfig) { c.dateTime = t; c.hasDateTime = true }
 }
 
-// WithSourceFormat sets the wsi-tools private tag WSISourceFormat (65083) on
+// WithSourceFormat sets the wsitools private tag WSISourceFormat (65083) on
 // the L0 IFD. The value should be the source format name (e.g. "svs",
 // "philips-tiff", "ome-tiff").
 func WithSourceFormat(s string) Option { return func(c *writerConfig) { c.sourceFormat = s } }
 
-// WithToolsVersion sets the wsi-tools private tag WSIToolsVersion (65084) on
-// the L0 IFD. The value should be the wsi-tools version string (e.g. "0.2.0").
+// WithToolsVersion sets the wsitools private tag WSIToolsVersion (65084) on
+// the L0 IFD. The value should be the wsitools version string (e.g. "0.2.0").
 func WithToolsVersion(s string) Option { return func(c *writerConfig) { c.toolsVersion = s } }
 
 // imageEntry holds the data for one IFD to be written.

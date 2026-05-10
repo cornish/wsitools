@@ -37,7 +37,7 @@ type IFDRecord struct {
 	NewSubfileType   uint64 // tag 254
 	ImageDescription string // tag 270 (truncated to 200 chars)
 
-	// wsi-tools private tags 65080–65084.
+	// wsitools private tags 65080–65084.
 	WSIImageType    string  // 65080
 	WSILevelIndex   *uint64 // 65081 (pointer so we distinguish "absent" from 0)
 	WSILevelCount   *uint64 // 65082
@@ -45,7 +45,7 @@ type IFDRecord struct {
 	WSIToolsVersion string  // 65084
 }
 
-// HasWSITags reports whether any of the wsi-tools private tags are present.
+// HasWSITags reports whether any of the wsitools private tags are present.
 func (r *IFDRecord) HasWSITags() bool {
 	return r.WSIImageType != "" || r.WSILevelIndex != nil ||
 		r.WSILevelCount != nil || r.WSISourceFormat != "" ||

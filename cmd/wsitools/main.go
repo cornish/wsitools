@@ -21,11 +21,11 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "wsi-tools",
+	Use:   "wsitools",
 	Short: "Utilities for whole-slide imaging (WSI) files",
-	Long: `wsi-tools — a Swiss-army knife for whole-slide imaging files used in digital pathology.
+	Long: `wsitools — a Swiss-army knife for whole-slide imaging files used in digital pathology.
 
-Run 'wsi-tools <command> --help' for command-specific flags and examples.`,
+Run 'wsitools <command> --help' for command-specific flags and examples.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		return setupLogger()
 	},
