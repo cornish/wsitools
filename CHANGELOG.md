@@ -4,6 +4,41 @@ All notable changes to wsi-tools will be documented here. The format is loosely 
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-10
+
+Project rename: `wsi-tools` → `wsitools`. Drops the hyphen everywhere
+the project's identity is exposed (module path, repo URL, binary name,
+CLI invocation, README/docs prose). Output files are bit-identical to
+v0.4 — the ImageDescription provenance string still emits
+`wsi-tools/<version>` and will swap in v0.5.1 once opentile-go v0.14.1
+ships a parser that accepts both prefixes.
+
+### Breaking (install path + binary name)
+
+- Module path: `github.com/cornish/wsi-tools` → `github.com/cornish/wsitools`.
+- Repo URL: `cornish/wsi-tools` → `cornish/wsitools` (GitHub auto-redirects old URLs).
+- Binary name: `wsi-tools` → `wsitools`.
+- Install: `go install github.com/cornish/wsitools/cmd/wsitools@latest`.
+
+### Unchanged
+
+- Every command and flag works identically.
+- Output file format is unchanged. Slides written by v0.5.0 are
+  byte-equivalent to slides written by v0.4 at the same options.
+- The `WSI*` private TIFF tag namespace (65080–65084) keeps its
+  current names and values.
+- Historical specs/plans under `docs/superpowers/` and CHANGELOG
+  entries v0.1.0–v0.4.1 retain their original "wsi-tools" prose as
+  time-capsule artifacts.
+- Existing v0.1.0–v0.4.1 binaries continue to work; the rename only
+  affects new installs from `@latest`.
+
+### Queued for v0.5.1
+
+- ImageDescription provenance prefix swap from `wsi-tools/<version>`
+  to `wsitools/<version>`, coordinated with an opentile-go v0.14.1
+  patch that accepts both prefixes.
+
 ## [0.4.0] — 2026-05-09
 
 Inspection-utilities milestone. Adds four read-side CLI utilities —
