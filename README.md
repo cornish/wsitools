@@ -8,7 +8,9 @@ A Swiss-army knife of utilities for whole-slide imaging (WSI) files used in digi
 
 See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
 
-## v0.2 — what's here
+## v0.4 — what's here
+
+**Write-side**
 
 - `wsi-tools downsample` — downsample a WSI by a power-of-2 factor (e.g. 40x → 20x).
   Regenerates the full pyramid from the new base. Passes through associated images
@@ -18,20 +20,30 @@ See [`CHANGELOG.md`](./CHANGELOG.md) for release notes.
   Five codec targets: `jpeg`, `jpegxl`, `avif`, `webp`, `htj2k`. Six source formats:
   SVS, Philips-TIFF, OME-TIFF (tiled), BIF, IFE, generic-TIFF. NDPI, OME-OneFrame,
   and Leica SCN error cleanly with `ErrUnsupportedFormat`.
+
+**Read-side (v0.4)**
+
+- `wsi-tools info` — slide summary: format, levels (dimensions + tile size + compression),
+  associated images, scanner metadata. Text or `--json`. Analog of `openslide-show-properties`.
+- `wsi-tools dump-ifds` — format-aware per-IFD layout dump. Annotates each IFD with its
+  classification (pyramid L0/L1/…/label/macro/thumbnail/overview/probability/map) and
+  reports wsi-tools private tags (65080–65084). Slim tiffinfo analog.
+- `wsi-tools extract --kind <k> -o <path>` — save an associated image
+  (label/macro/thumbnail/overview) as PNG (default) or JPEG. JPEG output is
+  byte-pass-through when the source is already JPEG.
+- `wsi-tools hash` — content hash. `--mode file` (default, `sha256sum`-equivalent) or
+  `--mode pixel` (L0 RGB tiles in raster order, stable across re-encode).
+
+**Diagnostics**
+
 - `wsi-tools doctor` — report installed codec libraries.
 - `wsi-tools version` — print version + Go runtime info.
 
-## Future
+## Roadmap
 
-- `jpegli` codec target (deferred from v0.2.0; Homebrew jpeg-xl bottle ships
-  libjxl without libjpegli). v0.2.1+ once upstream re-enables or we stand up a
-  build-from-source path.
-- HEIF, JPEG-LS, JPEG-XR, Basis Universal codec targets. v0.2.x.
-- NDPI + OME-OneFrame source support via virtual-tile materialisation. v0.3.
-- Streaming retrofit for `downsample` (currently holds full L0 raster in memory). v0.2.x.
-- Lanczos resampler for non-power-of-2 factors. v0.3.
-- GUI front-end. v0.4+.
-- Absorption of `cornish/wsi-label-tools` (label remove / replace).
+See [`docs/roadmap.md`](./docs/roadmap.md) for the full list of planned utilities
+(region extraction, DeepZoom export, HTTP tile server, DICOM-WSI conversion, more
+codecs, slide inventory/diff/verify, etc.) and architectural items still queued.
 
 ## Build prerequisites
 
@@ -95,6 +107,28 @@ wsi-tools transcode --codec webp --codec-opt webp.lossless=true -o out.tiff in.s
 wsi-tools transcode --codec htj2k -o out.tiff in.svs
 ```
 
+### Inspection
+
+```sh
+# Slide summary (analog of openslide-show-properties)
+wsi-tools info slide.svs
+
+# Same data as JSON for scripting
+wsi-tools info --json slide.svs | jq .levels
+
+# Format-aware per-IFD layout dump
+wsi-tools dump-ifds slide.svs
+
+# Save the slide's label as a standalone PNG
+wsi-tools extract --kind label -o label.png slide.svs
+
+# Content hash for cache identity / dedup (default: SHA-256 of file bytes)
+wsi-tools hash slide.svs
+
+# Pixel-stable hash (decodes L0 tiles → SHA-256 of RGB raster)
+wsi-tools hash --mode pixel slide.svs
+```
+
 ### Other
 
 ```sh
@@ -121,14 +155,14 @@ wrote CMU-1-Small-Region-10x.svs (1.0 MB, 39ms)
 
 ## Memory
 
-v0.1 holds the full L0 raster in memory during pyramid build:
+`downsample` (v0.1) still holds the full L0 raster in memory during pyramid build:
 
 - A 20x slide L0: ~50K × 30K × 3 ≈ 4.5 GB
 - A 40x slide L0: ~100K × 60K × 3 ≈ 18 GB
 
-This fits on most workstations but is tight on laptops. The `svs_40x_bigtiff.svs`
-fixture (~4.8 GB on disk, ~18 GB decoded) is excluded from the integration sweep
-for this reason. Streaming pyramid build is planned for v0.2.
+This fits on most workstations but is tight on laptops. `transcode` (v0.2+) streams
+per-tile and has a constant-memory ceiling regardless of slide size. A streaming
+retrofit for `downsample` is queued — see [`docs/roadmap.md`](./docs/roadmap.md).
 
 ## Testing
 
@@ -141,7 +175,7 @@ Integration tests run against real SVS fixtures, gated by `WSI_TOOLS_TESTDIR`:
 
 ```sh
 WSI_TOOLS_TESTDIR=$HOME/GitHub/opentile-go/sample_files \
-  go test ./tests/integration/ -tags integration -v -timeout 30m
+  go test ./tests/integration/ -tags integration -v -timeout 60m
 ```
 
 `sample_files/` in this repo is gitignored; soft-link to your fixture pool:
