@@ -4,6 +4,48 @@ All notable changes to wsi-tools will be documented here. The format is loosely 
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-09
+
+Inspection-utilities milestone. Adds four read-side CLI utilities —
+`info`, `dump-ifds`, `extract`, `hash` — analogs of openslide-tools and
+slim tiffinfo. Plus a shared `internal/cliout` package for text/JSON
+dual rendering, and a top-level `docs/roadmap.md` tracking the full
+utilities roadmap.
+
+### Added
+
+- **`wsi-tools info <file>`** — slide summary: file size, format,
+  scanner metadata (make/model/software/datetime/MPP/magnification),
+  pyramid levels with dimensions+tile size+compression per level, and
+  associated images. `--json` emits a structured object.
+- **`wsi-tools dump-ifds <file>`** — format-aware per-IFD layout dump.
+  Walks every IFD in file order (ClassicTIFF + BigTIFF, main chain +
+  SubIFDs), cross-references each against opentile-go's classifier
+  (pyramid L0/L1/.../label/macro/thumbnail/overview/probability/map),
+  and reports any wsi-tools private tags (65080–65084) present. Not a
+  full tiffinfo replacement — does not dump every TIFF tag. A `--raw`
+  expansion is reserved for batch 2.
+- **`wsi-tools extract --kind <k> -o <path> <file>`** — save an
+  associated image (label/macro/thumbnail/overview) as PNG (default) or
+  JPEG. When `--format jpeg` and source is already JPEG, bytes pass
+  through verbatim. PNG path decodes via `internal/decoder` (jpeg or
+  jpeg2000) or `golang.org/x/image/tiff` (lzw/deflate/none).
+- **`wsi-tools hash <file>`** — content hash. `--mode file` (default):
+  SHA-256 of file bytes, `sha256sum` equivalent. `--mode pixel`:
+  SHA-256 of L0 tiles decoded to RGB in raster order, stable across
+  re-encode. Output prefix names the algorithm (`sha256:` vs
+  `sha256-pixel:`) so any future algorithm change can use a different
+  prefix. Not byte-for-byte compatible with openslide-quickhash1.
+- **`internal/cliout`** — shared text/JSON dual-rendering helpers:
+  `RegisterJSONFlag`, `Render`, `JSON`. Used by all four batch-1
+  utilities to avoid per-subcommand format-flag boilerplate.
+- **`internal/source.WalkIFDs`** — TIFF IFD walker (ClassicTIFF +
+  BigTIFF, main chain + SubIFDs from tag 330) returning per-IFD
+  records with the tags `dump-ifds` needs.
+- **`docs/roadmap.md`** — durable record of the full utilities roadmap
+  (batch 1, batch 2, batch 3, and larger items: dzsave, tile-server,
+  DICOM-WSI conversion).
+
 ## [0.3.1] — 2026-05-08
 
 Patch release. Fixes the v0.3.0 Windows build: `internal/codec/all`
