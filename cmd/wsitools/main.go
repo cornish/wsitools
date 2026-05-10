@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	_ "github.com/cornish/wsi-tools/internal/codec/all"
+	_ "github.com/cornish/wsitools/internal/codec/all"
 	"github.com/spf13/cobra"
 )
 

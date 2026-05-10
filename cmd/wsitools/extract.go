@@ -14,8 +14,8 @@ import (
 	"github.com/spf13/cobra"
 	xtiff "golang.org/x/image/tiff"
 
-	"github.com/cornish/wsi-tools/internal/decoder"
-	"github.com/cornish/wsi-tools/internal/source"
+	"github.com/cornish/wsitools/internal/decoder"
+	"github.com/cornish/wsitools/internal/source"
 )
 
 var (

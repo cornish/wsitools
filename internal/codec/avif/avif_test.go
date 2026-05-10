@@ -5,7 +5,7 @@ package avif
 import (
 	"testing"
 
-	"github.com/cornish/wsi-tools/internal/codec"
+	"github.com/cornish/wsitools/internal/codec"
 )
 
 func TestAVIFEncoderRoundTrip(t *testing.T) {

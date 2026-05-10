@@ -20,8 +20,8 @@ import (
 	"strconv"
 	"unsafe"
 
-	"github.com/cornish/wsi-tools/internal/codec"
-	"github.com/cornish/wsi-tools/internal/wsiwriter"
+	"github.com/cornish/wsitools/internal/codec"
+	"github.com/cornish/wsitools/internal/wsiwriter"
 )
 
 func init() {

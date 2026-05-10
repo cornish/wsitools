@@ -2,4 +2,4 @@
 
 package all
 
-import _ "github.com/cornish/wsi-tools/internal/codec/avif"
+import _ "github.com/cornish/wsitools/internal/codec/avif"

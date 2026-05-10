@@ -1,6 +1,6 @@
 // Package all exists solely to import every codec subpackage so they register
 // themselves with the codec registry on import. Application binaries
-// (cmd/wsi-tools) blank-import this package once.
+// (cmd/wsitools) blank-import this package once.
 //
 // Optional codecs (avif, webp, jpegxl, htj2k) each live behind their own
 // `!no<name>` build tag — see the per-codec files in this package. Disabling
@@ -9,5 +9,5 @@
 package all
 
 import (
-	_ "github.com/cornish/wsi-tools/internal/codec/jpeg"
+	_ "github.com/cornish/wsitools/internal/codec/jpeg"
 )

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/cornish/wsi-tools/internal/wsiwriter"
+	"github.com/cornish/wsitools/internal/wsiwriter"
 )
 
 var (

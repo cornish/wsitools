@@ -1,7 +1,7 @@
 .PHONY: test vet cover bench install clean
 
 GO ?= go
-BIN = bin/wsi-tools
+BIN = bin/wsitools
 
 test:
 	$(GO) test ./... -race -count=1
@@ -17,10 +17,10 @@ bench:
 	$(GO) test ./tests/bench/... -bench=. -benchmem -run=^$$
 
 install:
-	$(GO) install ./cmd/wsi-tools
+	$(GO) install ./cmd/wsitools
 
 build:
-	$(GO) build -o $(BIN) ./cmd/wsi-tools
+	$(GO) build -o $(BIN) ./cmd/wsitools
 
 clean:
 	rm -rf bin/ coverage.txt

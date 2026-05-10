@@ -8,9 +8,9 @@ import (
 	_ "github.com/cornish/opentile-go/formats/all"
 	svsfmt "github.com/cornish/opentile-go/formats/svs"
 
-	"github.com/cornish/wsi-tools/internal/codec"
-	jpegcodec "github.com/cornish/wsi-tools/internal/codec/jpeg"
-	"github.com/cornish/wsi-tools/internal/wsiwriter"
+	"github.com/cornish/wsitools/internal/codec"
+	jpegcodec "github.com/cornish/wsitools/internal/codec/jpeg"
+	"github.com/cornish/wsitools/internal/wsiwriter"
 )
 
 // TestSyntheticSVSRoundTrip writes a synthetic 2-level Aperio-shaped SVS using

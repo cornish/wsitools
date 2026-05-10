@@ -14,11 +14,11 @@ import (
 	opentile "github.com/cornish/opentile-go"
 	"github.com/spf13/cobra"
 
-	codec "github.com/cornish/wsi-tools/internal/codec"
-	"github.com/cornish/wsi-tools/internal/decoder"
-	"github.com/cornish/wsi-tools/internal/pipeline"
-	"github.com/cornish/wsi-tools/internal/source"
-	"github.com/cornish/wsi-tools/internal/wsiwriter"
+	codec "github.com/cornish/wsitools/internal/codec"
+	"github.com/cornish/wsitools/internal/decoder"
+	"github.com/cornish/wsitools/internal/pipeline"
+	"github.com/cornish/wsitools/internal/source"
+	"github.com/cornish/wsitools/internal/wsiwriter"
 )
 
 var (

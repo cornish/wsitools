@@ -27,8 +27,8 @@ func testdir(t *testing.T) string {
 
 func buildOnce(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(os.TempDir(), "wsi-tools-it")
-	cmd := exec.Command("go", "build", "-o", bin, "./cmd/wsi-tools")
+	bin := filepath.Join(os.TempDir(), "wsitools-it")
+	cmd := exec.Command("go", "build", "-o", bin, "./cmd/wsitools")
 	cmd.Dir = "../.."
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, b)

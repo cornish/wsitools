@@ -2,4 +2,4 @@
 
 package all
 
-import _ "github.com/cornish/wsi-tools/internal/codec/htj2k"
+import _ "github.com/cornish/wsitools/internal/codec/htj2k"

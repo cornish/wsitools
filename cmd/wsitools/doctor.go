@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	codec "github.com/cornish/wsi-tools/internal/codec"
+	codec "github.com/cornish/wsitools/internal/codec"
 	"github.com/spf13/cobra"
 )
 
