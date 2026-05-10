@@ -1,11 +1,11 @@
-# wsi-tools
+# wsitools
 
 Go-based utilities for whole-slide imaging (WSI) files. v0.1 ships a downsample CLI;
 v0.2+ adds transcode + more source formats.
 
 ## Module path
 
-`github.com/cornish/wsi-tools`
+`github.com/cornish/wsitools`
 
 ## Conventions
 
@@ -14,7 +14,7 @@ v0.2+ adds transcode + more source formats.
 - Codecs = `internal/codec/<codec>/` subpackages, one per codec, registered via `init()`.
 - Decoders = `internal/decoder/` (smaller surface — only what source slides need).
 - Pipeline = `internal/pipeline` (worker-pool decode/process/encode).
-- CLI = `cmd/wsi-tools/` using cobra.
+- CLI = `cmd/wsitools/` using cobra.
 
 ## Test discipline
 

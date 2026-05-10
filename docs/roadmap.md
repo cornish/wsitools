@@ -1,6 +1,6 @@
-# wsi-tools utilities roadmap
+# wsitools utilities roadmap
 
-Tracks the full set of CLI utilities planned for wsi-tools, organised
+Tracks the full set of CLI utilities planned for wsitools, organised
 into "shipped" and "planned" sections. The shipped section is updated
 as releases land; the planned section is the source of truth for what's
 queued, deferred, or under consideration.
